@@ -9,26 +9,32 @@ grammar Language;
 //     self.lol="lol"
 // }
 prog: (stmt)+;
-stmt: expr #exprStmt
-    | ID ASSIGN expr  #assignment
+stmt: expr (NEWLINE+|EOF) #exprStmt
+    | assignment (NEWLINE+|EOF) #assignmentStmt
     ;
-expr: ID (func_arg)* #idExpr
+expr: ID (func_arg (COMMA func_arg)*)? #idExpr
+    | expr OBRAK  NEWLINE* expr NEWLINE* CBRAK #listAccess
     | left=expr op=(MULT|DIV|MOD) right=expr #multExpr
     | left=expr op=(PLUS|MINUS) right=expr #addExpr
-    | OPAR expr CPAR #parExpr
-    | DECIMAL #numberAtom
+    | OPAR NEWLINE* expr NEWLINE* CPAR #parExpr
+    | value #valueExpr
+    ;
+
+value: DECIMAL #numberAtom
     | EXPDECIMAL #expnumberAtom
     | INT #intAtom
     | BOOL #boolAtom
     | STRING #stringAtom
     | NULL #nullAtom
     ;
-func_arg: ID ASSIGN expr #namedArg
-    | ID (stmt)* expr END #blockArg
+func_arg: name=ID SEMICOL ASSIGN expr #namedArg
+    | ID NEWLINE (stmt NEWLINE)* expr NEWLINE? END #blockArg
     | expr #exprArg
     ;
+assignment: name=ID ASSIGN expr;
 SEMICOL:';';
 COL:':';
+COMMA: ',';
 FUNCTION: 'fn';
 CLASS: 'type';
 IF: 'if';
@@ -67,7 +73,10 @@ OPAR:'(';
 CPAR:')';
 OBRACE:'{';
 CBRACE:'}';
+OBRAK: '[';
+CBRAK: ']';
 STRING:'"'(~["\n\r]|('\\'[nrab]))*'"';
 ID: [a-zA-Z_][a-zA-Z0-9_]*;
 COMMENT:('#' ~[\r\n]* | '#*' (.)* '*#')->skip;
-WS: [ \t\n\r]+ -> skip;
+NEWLINE: '\n';
+WS: [ \t\r]+ -> skip;

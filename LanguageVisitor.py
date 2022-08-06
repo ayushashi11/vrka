@@ -19,8 +19,8 @@ class LanguageVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by LanguageParser#assignment.
-    def visitAssignment(self, ctx:LanguageParser.AssignmentContext):
+    # Visit a parse tree produced by LanguageParser#assignmentStmt.
+    def visitAssignmentStmt(self, ctx:LanguageParser.AssignmentStmtContext):
         return self.visitChildren(ctx)
 
 
@@ -29,8 +29,13 @@ class LanguageVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by LanguageParser#intAtom.
-    def visitIntAtom(self, ctx:LanguageParser.IntAtomContext):
+    # Visit a parse tree produced by LanguageParser#listAccess.
+    def visitListAccess(self, ctx:LanguageParser.ListAccessContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by LanguageParser#valueExpr.
+    def visitValueExpr(self, ctx:LanguageParser.ValueExprContext):
         return self.visitChildren(ctx)
 
 
@@ -39,33 +44,8 @@ class LanguageVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by LanguageParser#stringAtom.
-    def visitStringAtom(self, ctx:LanguageParser.StringAtomContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by LanguageParser#boolAtom.
-    def visitBoolAtom(self, ctx:LanguageParser.BoolAtomContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by LanguageParser#expnumberAtom.
-    def visitExpnumberAtom(self, ctx:LanguageParser.ExpnumberAtomContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by LanguageParser#numberAtom.
-    def visitNumberAtom(self, ctx:LanguageParser.NumberAtomContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by LanguageParser#multExpr.
     def visitMultExpr(self, ctx:LanguageParser.MultExprContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by LanguageParser#nullAtom.
-    def visitNullAtom(self, ctx:LanguageParser.NullAtomContext):
         return self.visitChildren(ctx)
 
 
@@ -74,18 +54,53 @@ class LanguageVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by LanguageParser#numberAtom.
+    def visitNumberAtom(self, ctx:LanguageParser.NumberAtomContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by LanguageParser#expnumberAtom.
+    def visitExpnumberAtom(self, ctx:LanguageParser.ExpnumberAtomContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by LanguageParser#intAtom.
+    def visitIntAtom(self, ctx:LanguageParser.IntAtomContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by LanguageParser#boolAtom.
+    def visitBoolAtom(self, ctx:LanguageParser.BoolAtomContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by LanguageParser#stringAtom.
+    def visitStringAtom(self, ctx:LanguageParser.StringAtomContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by LanguageParser#nullAtom.
+    def visitNullAtom(self, ctx:LanguageParser.NullAtomContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by LanguageParser#namedArg.
     def visitNamedArg(self, ctx:LanguageParser.NamedArgContext):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by LanguageParser#block.
-    def visitBlock(self, ctx:LanguageParser.BlockContext):
+    # Visit a parse tree produced by LanguageParser#blockArg.
+    def visitBlockArg(self, ctx:LanguageParser.BlockArgContext):
         return self.visitChildren(ctx)
 
 
     # Visit a parse tree produced by LanguageParser#exprArg.
     def visitExprArg(self, ctx:LanguageParser.ExprArgContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by LanguageParser#assignment.
+    def visitAssignment(self, ctx:LanguageParser.AssignmentContext):
         return self.visitChildren(ctx)
 
 

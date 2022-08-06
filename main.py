@@ -1,11 +1,14 @@
 from enum import Enum
-from langtypes import Types
+from typing import List
+from langtypes import Types, Value
 from functions import Function
 from llvmlite import ir, binding as llvm
 from LanguageLexer import LanguageLexer
 from LanguageParser import LanguageParser
 from LanguageVisitor import LanguageVisitor
 from antlr4 import InputStream, CommonTokenStream
+
+from utils import generate_format
 
 class BlockState(Enum):
     anon = ()
@@ -16,36 +19,25 @@ class LV(LanguageVisitor):
     def __init__(self, filename:str="a.out.ll") -> None:
         super().__init__()
         self.module = ir.Module(filename)
-        self.funcs = [Function(self.module, "main", [], Types.i64)]
+        self.funcs = [Function(self.module, "main", [Types.i64, Types.stringptr.as_pointer()], ["argc", "argv"], Types.i64)]
         self.funcs[-1].scopehnd.add_entry_block()
         #self.builders = [self.funcs[-1].scopehnd.add_entry_block()]
-        self.scopes = [dict()]
+        #self.scopes = [dict()]
         self.voidptr_ty = Types.i8.as_pointer()
-        fmt_i = "%d\n\0"
-        c_fmti = ir.Constant(ir.ArrayType(Types.i8, len(fmt_i)),
-                            bytearray(fmt_i.encode("utf8")))
-        self.global_fmti = ir.GlobalVariable(self.module, c_fmti.type, name="fstri")
-        self.global_fmti.linkage = 'internal'
-        self.global_fmti.global_constant = True
-        self.global_fmti.initializer = c_fmti  # type: ignore
-        fmt_f = "%f\n\0"
-        c_fmtf = ir.Constant(ir.ArrayType(Types.i8, len(fmt_f)),
-                            bytearray(fmt_f.encode("utf8")))
-        self.global_fmtf = ir.GlobalVariable(self.module, c_fmtf.type, name="fstrf")
-        self.global_fmtf.linkage = 'internal'
-        self.global_fmtf.global_constant = True
-        self.global_fmtf.initializer = c_fmtf #type: ignore
         printf_ty = ir.FunctionType(Types.i32, [self.voidptr_ty], var_arg=True)
         self.printf = ir.Function(self.module, printf_ty, name="printf")
         self.last_expr = None
         self._prev_last_expr = None
-
-
+    # def visitChildren(self, node):
+    #     #print(type(node))
+    #     return super().visitChildren(node)
     def visitAssignment(self, ctx: LanguageParser.AssignmentContext):
         id = str(ctx.ID())
-        expr = self.visit(ctx.expr())
-        print(id,expr)
-        self.scopes[-1][id] = expr
+        print(type(ctx.expr()))
+        expr: ir.Constant = self.visit(ctx.expr())
+        print("assignment",id,expr)
+        self.funcs[-1].scopehnd.set(id, expr)
+        print(self.funcs[-1].scopehnd.scopes)
         return expr
     def visitIntAtom(self, ctx: LanguageParser.IntAtomContext):
         val = Types.i64(int(str(ctx.INT() or 0)))
@@ -56,52 +48,111 @@ class LV(LanguageVisitor):
     def visitAddExpr(self, ctx: LanguageParser.AddExprContext):
         left: ir.Constant = self.visit(ctx.left)
         right: ir.Constant = self.visit(ctx.right)
-        op = str(ctx.op)
+        op = ctx.op.type
         match [left.type, right.type]:
-            case [Types.i64, Types.i64]:
-                return (self.funcs[-1].builder.add if op=="+" else self.funcs[-1].builder.sub)(left, right)
-            case [Types.floatt, Types.i64]:
+            case [x,y] if x in Types.ints and y in Types.ints and x==y:
+                return (self.funcs[-1].builder.add if op==LanguageParser.PLUS else self.funcs[-1].builder.sub)(left, right)
+            case [Types.floatt, y] if y in Types.ints:
                 right = self.funcs[-1].builder.sitofp(right, Types.floatt)
-                return (self.funcs[-1].builder.fadd if op=="+" else self.funcs[-1].builder.fsub)(left,right)
-            case [Types.i64, Types.floatt]:
+                return (self.funcs[-1].builder.fadd if op==LanguageParser.PLUS else self.funcs[-1].builder.fsub)(left,right)
+            case [x, Types.floatt] if x in Types.ints:
                 left = self.funcs[-1].builder.sitofp(left, Types.floatt)
-                return (self.funcs[-1].builder.fadd if op=="+" else self.funcs[-1].builder.fsub)(left,right)
+                return (self.funcs[-1].builder.fadd if op==LanguageParser.PLUS else self.funcs[-1].builder.fsub)(left,right)
             case [Types.floatt, Types.floatt]:
-                return (self.funcs[-1].builder.fadd if op=="+" else self.funcs[-1].builder.fsub)(left,right)
+                return (self.funcs[-1].builder.fadd if op==LanguageParser.PLUS else self.funcs[-1].builder.fsub)(left,right)
             case _:
-                pass
+                raise ValueError(f"cant combine {left} and {right}")
+    def visitParExpr(self, ctx: LanguageParser.ParExprContext):
+        return self.visit(ctx.expr())
+    def visitMultExpr(self, ctx: LanguageParser.MultExprContext):
+        left: ir.Constant = self.visit(ctx.left)
+        right: ir.Constant = self.visit(ctx.right)
+        op = ctx.op.type
+        match [left.type, right.type, op]:
+            case [x,y,LanguageParser.MULT] if x in Types.ints and y in Types.ints and x==y:
+                return self.funcs[-1].builder.mul(left, right)
+            case [x,y,LanguageParser.DIV] if x in Types.ints and y in Types.ints and x==y:
+                return self.funcs[-1].builder.sdiv(left, right)
+            case [x,y,LanguageParser.MOD] if x in Types.ints and y in Types.ints and x==y:
+                return self.funcs[-1].builder.srem(left, right)
+            case [Types.floatt, y, LanguageParser.MULT] if y in Types.ints:
+                right = self.funcs[-1].builder.sitofp(right, Types.floatt)
+                return self.funcs[-1].builder.fmul(left,right)
+            case [Types.floatt, y, LanguageParser.DIV] if y in Types.ints:
+                right = self.funcs[-1].builder.sitofp(right, Types.floatt)
+                return self.funcs[-1].builder.fdiv(left,right)
+            case [Types.floatt, y, LanguageParser.MOD] if y in Types.ints:
+                right = self.funcs[-1].builder.sitofp(right, Types.floatt)
+                return self.funcs[-1].builder.frem(left,right)
+            case [x, Types.floatt, LanguageParser.MULT] if x in Types.ints:
+                left = self.funcs[-1].builder.sitofp(left, Types.floatt)
+                return self.funcs[-1].builder.fmul(left,right)
+            case [x, Types.floatt, LanguageParser.DIV] if x in Types.ints:
+                left = self.funcs[-1].builder.sitofp(left, Types.floatt)
+                return self.funcs[-1].builder.fdiv(left,right)
+            case [x, Types.floatt, LanguageParser.MOD] if x in Types.ints:
+                left = self.funcs[-1].builder.sitofp(left, Types.floatt)
+                return self.funcs[-1].builder.frem(left,right)
+            case [Types.floatt, Types.floatt, LanguageParser.MULT]:
+                return self.funcs[-1].builder.mul(left, right)
+            case [Types.floatt, Types.floatt, LanguageParser.DIV]:
+                return self.funcs[-1].builder.sdiv(left, right)
+            case [Types.floatt, Types.floatt, LanguageParser.MOD]:
+                return self.funcs[-1].builder.srem(left, right)
+            case _:
+                raise ValueError(f"cant combine {left} and {right}")
+    
     def visitExprStmt(self, ctx: LanguageParser.ExprStmtContext):
-        self.last_expr=super().visitExprStmt(ctx)
-        return self.last_expr
-
+         self.last_expr=super().visitExprStmt(ctx)
+         return self.last_expr
+    
+    def visitListAccess(self, ctx: LanguageParser.ListAccessContext):
+        lis = self.visit(ctx.expr()[0])
+        index = self.visit(ctx.expr()[1])
+        print(lis,index)
+        return self.funcs[-1].builder.load(self.funcs[-1].builder.gep(lis,[index]))
 
     def visitIdExpr(self, ctx: LanguageParser.IdExprContext):
         id = str(ctx.ID())
         print(id)
-        exprs = ctx.func_arg()
-        if len(exprs) == 0:
-            return self.scopes[-1][id]
-        elif id=="print":
-            expr = self.visit(exprs[0])
-            print(expr)
-            match expr.type:
-                case Types.i64|Types.i32|Types.i16|Types.i8:
-                    fmti_arg = self.funcs[-1].builder.bitcast(self.global_fmti, self.voidptr_ty)
-                    return self.funcs[-1].builder.call(self.printf, [fmti_arg, expr])
-                case Types.floatt:
-                    fmtf_arg = self.funcs[-1].builder.bitcast(self.global_fmtf, self.voidptr_ty)
-                    expr = self.funcs[-1].builder.fpext(expr, Types.double)
-                    return self.funcs[-1].builder.call(self.printf, [fmtf_arg, expr])
+        exprs: List[Value] = ctx.func_arg()
+        for i,expr in enumerate(exprs):
+            print(type(expr))
+            exprs[i] = self.visit(expr)
+        print("exprs", exprs)
+        if id=="print":
+            print(exprs)
+            fmt_arg = generate_format(exprs, self.module, self.funcs[-1].builder.fpext)
+            fmt_arg = self.funcs[-1].builder.bitcast(fmt_arg, self.voidptr_ty)
+            return self.funcs[-1].builder.call(self.printf, [fmt_arg, *exprs])
+        elif id=="i8":
+            if len(exprs)==0:
+                return Types.i8(0)
+            if exprs[0].type in Types.ints:
+                return self.funcs[-1].builder.trunc(exprs[0], Types.i8)
+        elif id=="i16":
+            if exprs[0].type in Types.ints:
+                return self.funcs[-1].builder.trunc(exprs[0], Types.i16)
+        elif id=="i32":
+            if exprs[0].type in Types.ints:
+                return self.funcs[-1].builder.trunc(exprs[0], Types.i32)
+        elif len(exprs) == 0:
+            try:
+                return self.funcs[-1].scopehnd.get(id)
+            except ValueError:
+                fn=list(filter(lambda f:f.name==id and len(f.arg_t)==0, self.funcs))[0]
+                return self.funcs[-1].builder.call(fn, [])
+
 
 if __name__ == "__main__":
-    data = InputStream("x=5.5-2\nprint x")
+    data = InputStream("x=(5.5*8+3/2.)\nprint argc, x, argv[0]")
     lexer = LanguageLexer(data)
     stream = CommonTokenStream(lexer)
     parser = LanguageParser(stream)
     tree = parser.prog()
     visitor = LV()
     visitor.visit(tree)
-    visitor.funcs[-1].builder.ret((visitor.last_expr if visitor.last_expr.type == Types.i64 else None) or ir.IntType(64)(0))
+    visitor.funcs[-1].builder.ret((visitor.last_expr if visitor.last_expr is not None and visitor.last_expr.type == Types.i64 else None) or ir.IntType(64)(0))
     f=repr(visitor.module)
     print(f)
     file = open("a.out.ll","w")
@@ -116,4 +167,5 @@ if __name__ == "__main__":
     with llvm.create_mcjit_compiler(llvm_module, tm) as ee:
         ee.finalize_object()
         print(tm.emit_assembly(llvm_module))
+        open("out","wb").write(tm.emit_object(llvm_module))
 
