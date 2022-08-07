@@ -2,7 +2,7 @@ from llvmlite import ir
 from typing import List
 from langtypes import Types, Value
 _formats=dict()
-def generate_format(args: List[Value], module: ir.Module, fpext) -> Types.voidptr:
+def generate_format(args: List[Value], module: ir.Module, fpext) -> ir.GlobalVariable:
     name = "fstr"
     fstr = ""
     for i,arg in enumerate(args):

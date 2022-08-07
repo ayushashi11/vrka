@@ -45,6 +45,9 @@ class LV(LanguageVisitor):
     def visitNumberAtom(self, ctx: LanguageParser.NumberAtomContext):
         val = Types.floatt(float(str(ctx.DECIMAL() or 0)))
         return val
+    def visitExpnumberAtom(self, ctx: LanguageParser.ExpnumberAtomContext):
+        val = Types.floatt(float(str(ctx.EXPDECIMAL() or 0)))
+        return val
     def visitAddExpr(self, ctx: LanguageParser.AddExprContext):
         left: ir.Constant = self.visit(ctx.left)
         right: ir.Constant = self.visit(ctx.right)
