@@ -24,6 +24,16 @@ class LanguageVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by LanguageParser#useStmt.
+    def visitUseStmt(self, ctx:LanguageParser.UseStmtContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by LanguageParser#bitwiseExpr.
+    def visitBitwiseExpr(self, ctx:LanguageParser.BitwiseExprContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by LanguageParser#parExpr.
     def visitParExpr(self, ctx:LanguageParser.ParExprContext):
         return self.visitChildren(ctx)
@@ -41,6 +51,21 @@ class LanguageVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by LanguageParser#addExpr.
     def visitAddExpr(self, ctx:LanguageParser.AddExprContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by LanguageParser#unotExpr.
+    def visitUnotExpr(self, ctx:LanguageParser.UnotExprContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by LanguageParser#uminusExpr.
+    def visitUminusExpr(self, ctx:LanguageParser.UminusExprContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by LanguageParser#relatExpr.
+    def visitRelatExpr(self, ctx:LanguageParser.RelatExprContext):
         return self.visitChildren(ctx)
 
 
@@ -84,6 +109,11 @@ class LanguageVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by LanguageParser#exprArg.
+    def visitExprArg(self, ctx:LanguageParser.ExprArgContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by LanguageParser#namedArg.
     def visitNamedArg(self, ctx:LanguageParser.NamedArgContext):
         return self.visitChildren(ctx)
@@ -91,11 +121,6 @@ class LanguageVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by LanguageParser#blockArg.
     def visitBlockArg(self, ctx:LanguageParser.BlockArgContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by LanguageParser#exprArg.
-    def visitExprArg(self, ctx:LanguageParser.ExprArgContext):
         return self.visitChildren(ctx)
 
 

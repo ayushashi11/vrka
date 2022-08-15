@@ -40,26 +40,12 @@ class ScopeHandler:
         self.builders.append(builder)
         self._eblox+=1
         return builder
-    def add_cond_block(self) -> ir.IRBuilder:
-        block = self.func.append_basic_block(f"cond{self._condblox}")
-        builder = ir.IRBuilder(block)
-        self.blocks.append(block)
-        self.builders.append(builder)
-        self._condblox+=1
-        return builder
     def add_anon_block(self) -> ir.IRBuilder:
         block = self.func.append_basic_block(f"anon{self._anonblox}")
         builder = ir.IRBuilder(block)
         self.blocks.append(block)
         self.builders.append(builder)
         self._anonblox+=1
-        return builder
-    def add_loop_block(self) -> ir.IRBuilder:
-        block = self.func.append_basic_block(f"loop{self._loopblox}")
-        builder = ir.IRBuilder(block)
-        self.blocks.append(block)
-        self.builders.append(builder)
-        self._loopblox+=1
         return builder
     def pop_block(self):
         if len(self.blocks)<=self._i:raise ValueError("cant pop parent block")
@@ -80,6 +66,10 @@ class Function:
         self.scopehnd = ScopeHandler.inherit(parent_scopehnd,self.fnptr) if parent_scopehnd is not None else ScopeHandler(self.fnptr)
         for i,arg in enumerate(self.fnptr.args):
             self.scopehnd.set(arg_names[i], arg)
+    def __repr__(self) -> str:
+        return f"{self.name}({','.join(map(lambda t:str(t[0])+': '+str(t[1]), zip(self.arg_names, self.arg_t)))})->{self.type}"
+    def __str__(self) -> str:
+        return repr(self)
     @property
     def builder(self) -> ir.IRBuilder:
         return self.scopehnd.builders[-1]

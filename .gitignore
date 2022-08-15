@@ -2,5 +2,4 @@
 *.java
 .antlr
 __pycache__
-test.c
-test.ll
+test.*

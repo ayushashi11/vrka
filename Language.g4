@@ -11,11 +11,16 @@ grammar Language;
 prog: (stmt)+;
 stmt: expr (NEWLINE+|EOF) #exprStmt
     | assignment (NEWLINE+|EOF) #assignmentStmt
+    | USE (DOTTEDID|ID) (NEWLINE+|EOF) #useStmt
     ;
 expr: ID (func_arg (COMMA func_arg)*)? #idExpr
     | expr OBRAK  NEWLINE* expr NEWLINE* CBRAK #listAccess
+    | OPAR MINUS expr CPAR #uminusExpr
+    | NOT expr #unotExpr
     | left=expr op=(MULT|DIV|MOD) right=expr #multExpr
     | left=expr op=(PLUS|MINUS) right=expr #addExpr
+    | left=expr op=(EQ|NEQ|LT|GT|LTEQ|GTEQ) right=expr #relatExpr
+    | left=expr op=(BITAND|BITOR|BITXOR) right=expr #bitwiseExpr
     | OPAR NEWLINE* expr NEWLINE* CPAR #parExpr
     | value #valueExpr
     ;
@@ -27,19 +32,20 @@ value: DECIMAL #numberAtom
     | STRING #stringAtom
     | NULL #nullAtom
     ;
-func_arg: name=ID SEMICOL ASSIGN expr #namedArg
-    | ID NEWLINE (stmt NEWLINE)* expr NEWLINE? END #blockArg
-    | expr #exprArg
+func_arg: expr #exprArg
+    | name=ID COL expr #namedArg
+    | ID NEWLINE? (stmt NEWLINE)* expr NEWLINE? END #blockArg
     ;
 assignment: name=ID ASSIGN expr;
 SEMICOL:';';
 COL:':';
+DOTTEDID: ID (DOT ID)+;
 COMMA: ',';
 FUNCTION: 'fn';
 CLASS: 'type';
-IF: 'if';
-ELSE:'else';
-ELIF: 'elif';
+// IF: 'if';
+// ELSE:'else';
+// ELIF: 'elif';
 UNTIL: 'until';
 WHILE: 'while';
 FOR: 'for';
@@ -52,9 +58,14 @@ INT: [0-9]+;
 EXPDECIMAL:DECIMAL'e'('+'|'-')[0-9]+;
 TRUE:'true';
 FALSE:'false';
+USE: 'use';
 NULL:'null';
-OR:'or';
+BITOR:'|';
+BITAND:'&';
+BITXOR:'^';
 AND:'and';
+OR:'or';
+DOT: '.';
 EQ:'==';
 NEQ:'!=';
 GT:'>';
@@ -75,8 +86,8 @@ OBRACE:'{';
 CBRACE:'}';
 OBRAK: '[';
 CBRAK: ']';
-STRING:'"'(~["\n\r]|('\\'[nrab]))*'"';
+STRING:'"'(~["\n\r]|('\\'[nrbA])|('\\'[0-9a-fA-F]{2}))*'"';
 ID: [a-zA-Z_][a-zA-Z0-9_]*;
 COMMENT:('#' ~[\r\n]* | '#*' (.)* '*#')->skip;
-NEWLINE: '\n';
-WS: [ \t\r]+ -> skip;
+NEWLINE: [\n\r]+;
+WS: [ \t]+ -> skip;
