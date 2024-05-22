@@ -2,8 +2,8 @@ a.out
 .expendables
 */target*
 */__pycache__*
-poetry.lock
 *.s
 *.ll
+*.lock
 *.o
 tree.png
