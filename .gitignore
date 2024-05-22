@@ -1,0 +1,9 @@
+a.out
+.expendables
+*/target*
+*/__pycache__*
+poetry.lock
+*.s
+*.ll
+*.o
+tree.png

@@ -1,0 +1,185 @@
+single_input: simple_stmt | compound_stmt 
+file_input: (compound_stmt)*
+eval_input: exprlist
+arguments: argvalue ("," argvalue)*
+?argvalue: expr
+         | name "=" expr
+decorator: "@" name_dotted ["("list_{name}")"]//[ "(" arguments ")" ]
+decorators: decorator+
+decorated: decorators ( funcdef | async_funcdef | classdef) // enumdef |
+classdef: "class" name ["<" list_{name} ">"] ["(" parameters ")"]
+async_funcdef: "async" funcdef
+funcdef: "def" name ["(" parameters ")"] ["->" type] block
+parameters: typedparams [optionalparams]
+          | optionalparams
+typedparams: typedparam ("," typedparam)*
+optionalparams: optionalparam ("," optionalparams)*
+optionalparam: name ":" optional_type
+typedparam: name ":" type_non_optional
+async_lambdef: "async" lambdef
+lambdef: "lambda" ["(" parameters ")"] ["->" type] block_lamb
+?stmt: simple_stmt | compound_stmt
+?simple_stmt: small_stmt (";" small_stmt)* [";"]
+?small_stmt: (expr_stmt | assign_stmt | flow_stmt | assert_stmt) //| global_stmt | nonlocal_stmt | pass_stmt | del_stmt | import_stmt
+expr_stmt: exprlist
+?assign_stmt: assign
+assign: assign_left "=" expr//exprlist "=" exprlist
+// assign: testlist_star_expr ("=" (yield_expr|testlist_star_expr))+
+// augassign: testlist_star_expr augassign_op testlist
+?assign_left: [mut] name -> assign_left_normal
+           | atom_expr "[" subscriptlist "]" -> assign_left_subscript
+           | getattrib
+mut: "mut"
+!augassign_op: "+=" | "-=" | "*=" | "@=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | "**=" | "//="
+?flow_stmt: break_stmt | continue_stmt | return_stmt //| raise_stmt | yield_stmt
+break_stmt: "break" name?
+continue_stmt: "continue" name?
+return_stmt: "return" [exprlist]
+import_stmt: "import" ("*" | "(" import_as_names ")" | import_as_name) ["from" (dots? name_dotted | dots)]
+!dots: "."+
+import_as_name: name ["as" name]
+dotted_as_name: name_dotted ["as" name]
+import_as_names: import_as_name ("," import_as_name)* [","]
+dotted_as_names: dotted_as_name ("," dotted_as_name)*
+assert_stmt: "assert" expr ["," expr]
+?compound_stmt: if_stmt | while_stmt | for_stmt | with_stmt | funcdef |  decorated | async_stmt | until_stmt | import_stmt | classdef //| enumdef | try_stmt | match_stmt
+async_stmt: "async" (with_stmt | for_stmt)
+if_stmt: "if" expr block elifs ["else" block]
+elifs: elif_*
+elif_: "elif" expr block
+while_stmt: [name] "while" expr block //["else" block]
+until_stmt: [name] "until" expr block //["else" block]
+for_stmt: name? "for" exprlist "in" exprlist block ["else" block]
+// try_stmt: "try" ":" suite except_clauses ["else" ":" suite] [finally]
+//         | "try" ":" suite finally   -> try_finally
+// finally: "finally" ":" suite
+// except_clauses: except_clause+
+// except_clause: "except" [test ["as" name]] ":" suite
+with_stmt: "with" with_items  block
+with_items: with_item ("," with_item)*
+with_item: expr ["as" name]
+?block_lamb: ":" simple_stmt
+           | block 
+block: "{" stmt* "}"
+?exprlist: expr | exprlist_tuple
+exprlist_tuple: expr (("," expr)+ [","] | ",")
+?expr: lor_expr
+     | lor_expr "if" lor_expr "else" expr -> ternary
+     | lambdef
+     | async_lambdef
+//?test_nocond: or_test 
+
+?lor_expr: land_expr ("or" land_expr)*
+?land_expr: not_expr_ ("and" not_expr_)*
+?not_expr_: "not" not_expr_ -> not_expr
+         | comparison
+?comparison: bor_expr (comp_op bor_expr)*
+//star_expr: "*" expr
+?bor_expr: bxor_expr ("|" bxor_expr)*
+?bxor_expr: band_expr ("^" band_expr)*
+?band_expr: shift_expr ("&" shift_expr)*
+?shift_expr: arith_expr (_shift_op arith_expr)*
+?arith_expr: term (_add_op term)*
+?term: factor (_mul_op factor)*
+?factor: _unary_op factor -> unary
+       | power
+?power: await_expr ("**" factor)?
+?await_expr: AWAIT? atom_expr
+?atom_expr: atom_expr "(" [arguments] ")"    -> funccall
+          | "<" type_init ">" "{" arguments "}"      -> insexpr    
+          | atom_expr "[" subscriptlist "]" -> getsubscrip
+          | getattrib
+          | atom
+getattrib: atom_expr "." name
+?subscriptlist: subscript
+              | subscript (("," subscript)+ [","] | ",") -> subscript_tuple
+?subscript: expr | ([expr] ".." [expr] [sliceop]) -> slice
+sliceop: ".." [expr]
+key_value: expr ":" expr
+key_values: key_value ("," key_value)*
+?atom: "[" exprlist? "]" -> list
+     | "#" "{" key_values? "}" -> dictionary
+     | name -> var
+     | number
+     | string_concat
+     | "(" expr ")"
+     | "..." -> ellipsis
+     | "None"    -> const_none
+     | "True"    -> const_true
+     | "False"   -> const_false
+// "(" yield_expr ")"
+//      | "(" _tuple_inner? ")" -> tuple
+//      | "(" comprehension{test_or_star_expr} ")" -> tuple_comprehension
+//      | "[" _exprlist? "]"  -> list
+//      | "[" comprehension{test_or_star_expr} "]"  -> list_comprehension
+//      | "{" _dict_exprlist? "}" -> dict
+//      | "{" comprehension{key_value} "}" -> dict_comprehension
+//      | "{" _exprlist "}" -> set
+//      | "{" comprehension{test} "}" -> set_comprehension
+?string_concat: string+
+!_unary_op: "+"|"-"|"~"|"&"
+!_add_op: "+"|"-"
+!_shift_op: "<<"|">>"
+!_mul_op: "*"|"@"|"/"|"%"
+// <> isn't actually a valid comparison operator in Python. It's here for the
+// sake of a __future__ import described in PEP 401 (which really works :-)
+!comp_op: "<"|">"|"=="|">="|"<="|"<>"|"!="|"in"|"not" "in"|"is"|"is" "not"
+AWAIT: "await"
+name_typed: name ":" type
+name_expr: name "=" expr
+ASYNC: "async"
+list_{k}: k ("," k)*
+?type_init: ref_type
+        | list_type_init
+        | proper_type //generic_type
+        | "Self" -> self_type_init
+?type: type_non_optional
+        | optional_type
+?type_non_optional: ref_type
+        | list_type
+        | fn_type
+        | generic_type
+        | self_type
+optional_type: generic_type "?"
+        | self_type "?" 
+        | "(" (ref_type|list_type|fn_type) ")" "?"
+self_type: "Self"
+fn_type: "fn" ["(" list_{type} ")"] ["->" type]
+ref_type: "*" type
+list_type: "[" "]" type 
+list_type_init: "[" number "]" type
+generic_type: proper_type ["<" list_{type} ">"]
+proper_type: type_name_dotted
+type_name_dotted: type_name ("." type_name)*
+name_dotted: name ("." name)*
+number: (DEC_NUMBER | HEX_NUMBER | BIN_NUMBER | OCT_NUMBER | FLOAT_NUMBER | IMAG_NUMBER)["'" type]
+string: STRING | LONG_STRING
+//lex
+
+%ignore /[ \f\t\r\n]+/  // WS
+//%ignore /\\[\t \f]*\r?\n/   // LINE_CONT
+%ignore COMMENT
+
+
+// Python terminals
+!name: NAME
+!type_name: TYPE_NAME
+NAME: /[^\W\d]\w*/
+TYPE_NAME: /[^\W\d]\w*/
+
+COMMENT: /#[^\n]*/
+
+STRING: /([ubf]?r?p?|r[ubf])("(?!"").*?(?<!\\)(\\\\)*?")/i
+LONG_STRING: /([ubf]?r?p?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')/is
+
+_SPECIAL_DEC: "0".."9"        ("_"?  "0".."9"                       )*
+DEC_NUMBER:   "1".."9"        ("_"?  "0".."9"                       )*
+          |   "0"             ("_"?  "0"                            )* /(?![1-9])/
+HEX_NUMBER.2: "0" ("x" | "X") ("_"? ("0".."9" | "a".."f" | "A".."F"))+
+OCT_NUMBER.2: "0" ("o" | "O") ("_"?  "0".."7"                       )+
+BIN_NUMBER.2: "0" ("b" | "B") ("_"?  "0".."1"                       )+
+
+_EXP: ("e"|"E") ["+" | "-"] _SPECIAL_DEC
+DECIMAL: "." _SPECIAL_DEC | _SPECIAL_DEC "." _SPECIAL_DEC?
+FLOAT_NUMBER.2: _SPECIAL_DEC _EXP | DECIMAL _EXP?
+IMAG_NUMBER.2: (_SPECIAL_DEC      | FLOAT_NUMBER) ("J" | "j")
