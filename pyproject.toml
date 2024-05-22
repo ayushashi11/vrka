@@ -8,9 +8,9 @@ readme = "README.md"
 [tool.poetry.dependencies]
 python = "^3.12"
 lark = "^1.1.9"
-llvmlite = "^0.42.0"
+llvmlite = {path = "llvmlite/llvmite/"}
 werkzeug = "^3.0.2"
-alg-types = {path = "../alg_types/dist/alg_types-0.1.1-py3-none-any.whl"}
+alg-types = "^0.1.1"
 uuid = "^1.30"
 
 
