@@ -10,40 +10,40 @@ class VrType:
         fields: dict[str, Self]
         defaults: dict[str, Self] #TODO: change to list of Constants
         def check_eq(self, other: Self) -> bool:
-            for field, ofield in zip(self.fields.items(), other.fields.items()):
-                if not field[1].check_eq(ofield[1]):
+            for field, ofield in zip(self.fields.values(), other.fields.values()):#zip(self.fields.items(), other.fields.items()):
+                if not field.check_eq(ofield):
                     return False
-            for default, odefault in zip(self.defaults.items(), other.defaults.items()):
-                if not default[1].check_eq(odefault[1]):
+            for default, odefault in zip(self.defaults.values(), other.defaults.values()):#zip(self.defaults.items(), other.defaults.items()):
+                if not default.check_eq(odefault):
                     return False
             return True
     @dataclass
     class FuncOpts:
-        params: dict[str, Self]
+        params: list[Self]
         ret: Self
         def check_eq(self, other: Self) -> bool:
-            for param, oparam in zip(self.params.items(), other.params.items()):
-                if not param[1].check_eq(oparam[1]):
+            for param, oparam in zip(self.params, other.params):#zip(self.params.items(), other.params.items()):
+                if not param.check_eq(oparam):
                     return False
             return self.ret.check_eq(other.ret)
     @variant
-    def Integer(v: int, len: int): ...
+    def Integer( len: int): ...
     @variant
-    def UnsignedInt(v: int, len: int): ...
+    def UnsignedInt(len: int): ...
     @variant
-    def Float(v: float): ...
+    def Float(): ...
     @variant
-    def Double(v: float): ...
+    def Double(): ...
     @variant
-    def String(v: str): ...
+    def String(): ...
     @variant
     def Void(): ...
     @variant
-    def Pointer(v: Self): ...
+    def Pointer(to: Self): ...
     @variant
-    def Optional(v: Self): ...
+    def Optional(of: Self): ...
     @variant
-    def List(v: Self): ...
+    def List(of: Self): ...
     @variant
     def Struct(opts: StructOpts): ...
     @variant
@@ -72,14 +72,14 @@ class VrType:
             other.vars = sum_list
             return True
         if self.__class__ == VrType.Pointer and other.__class__ == VrType.Pointer:
-            return self.v.check_eq(other.v)
+            return self.to.check_eq(other.to)
         if self.__class__ == VrType.Optional and other.__class__ == VrType.Optional:
-            return self.v.check_eq(other.v)
+            return self.of.check_eq(other.of)
         if self.__class__ == VrType.Struct and other.__class__ == VrType.Struct:
             return self.opts.check_eq(other.opts)
         if self.__class__ == VrType.Function and other.__class__ == VrType.Function:
             return self.opts.check_eq(other.opts)
         if self.__class__ == VrType.List and other.__class__ == VrType.List:
-            return self.v.check_eq(other.v)
+            return self.of.check_eq(other.of)
         return False
     

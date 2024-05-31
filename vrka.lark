@@ -6,8 +6,13 @@ arguments: argvalue ("," argvalue)*
          | name "=" expr
 decorator: "@" name_dotted ["("list_{name}")"]//[ "(" arguments ")" ]
 decorators: decorator+
-decorated: decorators ( funcdef | async_funcdef | classdef) // enumdef |
-classdef: "class" name ["<" list_{name} ">"] ["(" parameters ")"]
+decorated: decorators ( funcdef | async_funcdef | classdef | enumdef)
+classdef: "class" name ["<" list_{name} ">"] ["(" parameters ")"] ["{" funcdef+ "}"]
+enumdef: "enum" name ["<" list_{name} ">"] ["{" enum_members "}"]
+enum_members: enum_member ("," enum_member)*
+?enum_member: name -> normal_enum_mem
+           | name "(" list_{type} ")" -> enum_mem_with_params
+           | name "=" expr -> enum_mem_with_val
 async_funcdef: "async" funcdef
 funcdef: "def" name ["(" parameters ")"] ["->" type] block
 parameters: typedparams [optionalparams]
@@ -42,7 +47,7 @@ dotted_as_name: name_dotted ["as" name]
 import_as_names: import_as_name ("," import_as_name)* [","]
 dotted_as_names: dotted_as_name ("," dotted_as_name)*
 assert_stmt: "assert" expr ["," expr]
-?compound_stmt: if_stmt | while_stmt | for_stmt | with_stmt | funcdef |  decorated | async_stmt | until_stmt | import_stmt | classdef //| enumdef | try_stmt | match_stmt
+?compound_stmt: if_stmt | while_stmt | for_stmt | with_stmt | funcdef |  decorated | async_stmt | until_stmt | import_stmt | classdef | enumdef //| try_stmt | match_stmt
 async_stmt: "async" (with_stmt | for_stmt)
 if_stmt: "if" expr block elifs ["else" block]
 elifs: elif_*
@@ -85,9 +90,11 @@ exprlist_tuple: expr (("," expr)+ [","] | ",")
        | power
 ?power: await_expr ("**" factor)?
 ?await_expr: AWAIT? atom_expr
-?atom_expr: atom_expr "(" [arguments] ")"    -> funccall
-          | "<" type_init ">" "{" arguments "}"      -> insexpr    
-          | atom_expr "[" subscriptlist "]" -> getsubscrip
+?atom_expr: atom_expr "(" [arguments] ")"               -> funccall
+          | atom_expr "." name "(" [arguments] ")"      -> methodcall
+          | atom_expr "::" "{" arguments "}"            -> insexpr 
+          | atom_expr "::" name ["{" arguments "}"]     -> enum_insexpr
+          | atom_expr "[" subscriptlist "]"             -> getsubscrip
           | getattrib
           | atom
 getattrib: atom_expr "." name
@@ -98,15 +105,16 @@ sliceop: ".." [expr]
 key_value: expr ":" expr
 key_values: key_value ("," key_value)*
 ?atom: "[" exprlist? "]" -> list
-     | "#" "{" key_values? "}" -> dictionary
-     | name -> var
+     | "#" "{" key_values? "}"  -> dictionary
+     | name                     -> var
+     | type_init
      | number
      | string_concat
      | "(" expr ")"
-     | "..." -> ellipsis
-     | "None"    -> const_none
-     | "True"    -> const_true
-     | "False"   -> const_false
+     | "..."                    -> ellipsis
+     | "None"                   -> const_none
+     | "True"                   -> const_true
+     | "False"                  -> const_false
 // "(" yield_expr ")"
 //      | "(" _tuple_inner? ")" -> tuple
 //      | "(" comprehension{test_or_star_expr} ")" -> tuple_comprehension
@@ -123,7 +131,7 @@ key_values: key_value ("," key_value)*
 !_mul_op: "*"|"@"|"/"|"%"
 // <> isn't actually a valid comparison operator in Python. It's here for the
 // sake of a __future__ import described in PEP 401 (which really works :-)
-!comp_op: "<"|">"|"=="|">="|"<="|"<>"|"!="|"in"|"not" "in"|"is"|"is" "not"
+!comp_op: "<"|">"|"=="|">="|"<="|"<>"|"!="|"in"|"not" "in"
 AWAIT: "await"
 name_typed: name ":" type
 name_expr: name "=" expr
@@ -132,7 +140,7 @@ list_{k}: k ("," k)*
 ?type_init: ref_type
         | list_type_init
         | proper_type //generic_type
-        | "Self" -> self_type_init
+        | self_type
 ?type: type_non_optional
         | optional_type
 ?type_non_optional: ref_type
@@ -149,11 +157,11 @@ ref_type: "*" type
 list_type: "[" "]" type 
 list_type_init: "[" number "]" type
 generic_type: proper_type ["<" list_{type} ">"]
-proper_type: type_name_dotted
+?proper_type: type_name_dotted
 type_name_dotted: type_name ("." type_name)*
 name_dotted: name ("." name)*
 number: (DEC_NUMBER | HEX_NUMBER | BIN_NUMBER | OCT_NUMBER | FLOAT_NUMBER | IMAG_NUMBER)["'" type]
-string: STRING | LONG_STRING
+string: line_string | LONG_STRING
 //lex
 
 %ignore /[ \f\t\r\n]+/  // WS
@@ -162,14 +170,30 @@ string: STRING | LONG_STRING
 
 
 // Python terminals
+!line_string: "\"" string_char* "\""
+!string_char: STRING_CHAR_UTF16         -> string_char_utf16
+            | STRING_CHAR_UTF8          -> string_char_utf8
+            | STRING_CHAR_X             -> string_char_x
+            | STRING_CHARS_SIMPLE       -> string_char_simple
+            | STRING_CHAR_ESCAPED       -> string_char_escaped
 !name: NAME
-!type_name: TYPE_NAME
+     | "@" line_string -> string_name
+!type_name: /i\d+/      -> int_type_name
+          | /u\d+/      -> uint_type_name
+          | "float"     -> float_type_name
+          | "bool"      -> bool_type_name
+          | "double"    -> double_type_name
+          | TYPE_NAME
 NAME: /[^\W\d]\w*/
 TYPE_NAME: /[^\W\d]\w*/
 
 COMMENT: /#[^\n]*/
 
-STRING: /([ubf]?r?p?|r[ubf])("(?!"").*?(?<!\\)(\\\\)*?")/i
+STRING_CHAR_ESCAPED: "\\" /[abfnrtv"'\\]/
+STRING_CHAR_UTF16: "\\U" /[0-9a-fA-F]{8}/
+STRING_CHAR_UTF8: "\\u" /[0-9a-fA-F]{4}/
+STRING_CHAR_X: "\\x" /[0-9a-fA-F]{2}/
+STRING_CHARS_SIMPLE: /([^"\\]+)/i //To fix: this cant capture newline and tab and all
 LONG_STRING: /([ubf]?r?p?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')/is
 
 _SPECIAL_DEC: "0".."9"        ("_"?  "0".."9"                       )*
@@ -181,5 +205,5 @@ BIN_NUMBER.2: "0" ("b" | "B") ("_"?  "0".."1"                       )+
 
 _EXP: ("e"|"E") ["+" | "-"] _SPECIAL_DEC
 DECIMAL: "." _SPECIAL_DEC | _SPECIAL_DEC "." _SPECIAL_DEC?
-FLOAT_NUMBER.2: _SPECIAL_DEC _EXP | DECIMAL _EXP?
+FLOAT_NUMBER.2: _SPECIAL_DEC _EXP | DECIMAL _EXP? | "inf" | "-inf"
 IMAG_NUMBER.2: (_SPECIAL_DEC      | FLOAT_NUMBER) ("J" | "j")

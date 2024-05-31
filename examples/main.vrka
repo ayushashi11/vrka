@@ -1,7 +1,15 @@
-@derive(debug) class Test(a: Str, b: i8)
+@derive(debug)
+class Test(a: Str, b: *bool){
+    def print_b(self: Self){
+        println(self.b)
+    }
+}
 def main(argc: i32, argv: *Str) -> i32{
-    t = <Test>{"lmao",2'i8}
-    print(t)
-    print("\n")
+    t = Test::{
+        argv.deref,
+        &(5>4 and 4>3)
+    }
+    println(t)
+    t.print_b()
     return 0
 }

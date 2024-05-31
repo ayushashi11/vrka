@@ -18,6 +18,8 @@ class LateInitStr:
         return self.st
     def __repr__(self) -> str:
         return str(self)
+
+BoolType = ir.IntType(1)
 class UIntType(ir.IntType):
     pass
 @v_args(inline=True)
@@ -29,7 +31,19 @@ class FileParser(Interpreter):
         self.module = ir.Module(file_name)
         Str = ir.global_context.get_identified_type("Str")
         Str.set_body(ir.IntType(8).as_pointer(), ir.IntType(64))
-        self.structs = {"Str":{"ir":Str, "args": {"len": {"type": ir.IntType(64), "index": 1}}}}
+        Ret = ir.global_context.get_identified_type("Ret")
+        ret_array = ir.ArrayType(ir.IntType(8), Str.get_abi_size(llvm.create_target_data("")))
+        Ret.set_body(ir.IntType(8),ret_array)
+        RetOk = ir.global_context.get_identified_type("Ret::Ok")
+        RetOk.set_body(ir.IntType(8))
+        RetErr = ir.global_context.get_identified_type("Ret::Err")
+        RetErr.set_body(ir.IntType(8), Str)
+        self.structs = {
+            "Str":{"ir":Str, "args": {"len": {"type": ir.IntType(64), "index": 1}}},
+            "Ret":{"ir":Ret, "args": {"tag": {"type": ir.IntType(8), "index": 0}, "raw_data": {"type": ret_array, "index": 1}}, "enum_names":["Ok","Err"]},
+            "Ret::Ok":{"ir":RetOk, "args": {"tag": {"type": ir.IntType(8), "index": 0}}},
+            "Ret::Err":{"ir":RetErr, "args": {"tag": {"type": ir.IntType(8), "index": 0}, "raw_data": {"type": Str, "index": 1}}},
+        }
         self.builder = None
         self.func = None
         self.class_ = None
@@ -45,16 +59,46 @@ class FileParser(Interpreter):
         print_i_ty = ir.FunctionType(ir.VoidType(), [ir.IntType(64)])
         self.print_i = ir.Function(self.module, print_i_ty, 'print_i')
         self.print_i.linkage = 'external'
+        print_bool_ty = ir.FunctionType(ir.VoidType(), [ir.IntType(1)])
+        self.print_bool = ir.Function(self.module, print_bool_ty, 'print_bool')
+        self.print_bool.linkage = 'external'
         print_i128_ty = ir.FunctionType(ir.VoidType(), [ir.IntType(128)])
         self.print_i128 = ir.Function(self.module, print_i128_ty, 'print_i128')
         self.print_i128.linkage = 'external'
         print_f_ty = ir.FunctionType(ir.VoidType(), [ir.DoubleType()])
         self.print_f = ir.Function(self.module, print_f_ty, 'print_f')
         self.print_f.linkage = 'external'
-        self.vars = {"print": {"scope": ir.global_context, "type": print_ty, "value": print_, "const": True}}
+        println_ty = ir.FunctionType(ir.VoidType(), [Str])
+        println_ = ir.Function(self.module, println_ty, 'println')
+        println_.linkage = 'external'
+        println_i_ty = ir.FunctionType(ir.VoidType(), [ir.IntType(64)])
+        self.println_i = ir.Function(self.module, println_i_ty, 'println_i')
+        self.println_i.linkage = 'external'
+        println_bool_ty = ir.FunctionType(ir.VoidType(), [ir.IntType(1)])
+        self.println_bool = ir.Function(self.module, println_bool_ty, 'println_bool')
+        self.println_bool.linkage = 'external'
+        println_i128_ty = ir.FunctionType(ir.VoidType(), [ir.IntType(128)])
+        self.println_i128 = ir.Function(self.module, println_i128_ty, 'println_i128')
+        self.println_i128.linkage = 'external'
+        println_f_ty = ir.FunctionType(ir.VoidType(), [ir.DoubleType()])
+        self.println_f = ir.Function(self.module, println_f_ty, 'println_f')
+        self.println_f.linkage = 'external'
+        self.str_rev_ty = ir.FunctionType(Str.as_pointer(), [Str])
+        self.str_rev = ir.Function(self.module, self.str_rev_ty, 'vrka_Str_reverse')
+        self.str_rev.linkage = 'external' 
+        self.vars = {
+            "print": {"scope": ir.global_context, "type": print_ty, "value": print_, "const": True},
+            "println": {"scope": ir.global_context, "type": println_ty, "value": println_, "const": True},
+            "Str::reverse": {"scope": ir.global_context, "type": self.str_rev_ty, "value": self.str_rev, "const": True},
+        }
+        self.fn_prefix = ''
         #declare a global variable called __FILE__ with the value of the file name
     def __print(self, args):
-        if isinstance(args[0].type,ir.IntType) and args[0].type.width>64:
+        if isinstance(args[0].type, ir.PointerType):
+            return self.__print([self.builder.load(args[0])])
+        if isinstance(args[0].type,ir.IntType) and id(args[0].type)==id(BoolType):
+            return self.builder.call(self.print_bool,[args[0]])
+        elif isinstance(args[0].type,ir.IntType) and args[0].type.width>64:
             return self.builder.call(self.print_i128,[cast(args[0], ir.IntType(128), self.builder)])
         elif isinstance(args[0].type,ir.IntType):
             return self.builder.call(self.print_i,[self.builder.zext(args[0], ir.IntType(64))])
@@ -64,6 +108,21 @@ class FileParser(Interpreter):
             return self.builder.call(self.vars[f"print_{args[0].type.name}"]["value"],[args[0]])
         else:
             return self.builder.call(self.vars["print"]["value"], args)
+    def __println(self, args):
+        if isinstance(args[0].type, ir.PointerType):
+            return self.__println([self.builder.load(args[0])])
+        if isinstance(args[0].type,ir.IntType) and id(args[0].type)==id(BoolType):
+            return self.builder.call(self.println_bool,[args[0]])
+        elif isinstance(args[0].type,ir.IntType) and args[0].type.width>64:
+            return self.builder.call(self.println_i128,[cast(args[0], ir.IntType(128), self.builder)])
+        elif isinstance(args[0].type,ir.IntType):
+            return self.builder.call(self.println_i,[self.builder.zext(args[0], ir.IntType(64))])
+        elif (isinstance(args[0].type,ir.FloatType) or isinstance(args[0].type,ir.DoubleType)):
+            return self.builder.call(self.println_f,[self.builder.fpext(args[0], ir.DoubleType())])
+        elif args[0].type!=self.structs["Str"]["ir"]:
+            return self.builder.call(self.vars[f"println_{args[0].type.name}"]["value"],[args[0]])
+        else:
+            return self.builder.call(self.vars["println"]["value"], args)
     def assign(self, left, expr):
         left = self.visit(left)
         expr = self.visit(expr)
@@ -102,10 +161,27 @@ class FileParser(Interpreter):
             return ir.FloatType()
         elif typ=="double":
             return ir.DoubleType()
+        elif typ=="void":
+            return ir.VoidType()
+        elif typ=="bool":
+            return BoolType
         try:
             return self.structs[typ]["ir"]
         except KeyError:
             return typ
+    def shift_expr(self, *operands):
+        ret = self.visit(operands[-1])
+        #right to left
+        for i in range(len(operands)-2,-1,-2):
+            op = operands[i]
+            val = self.visit(operands[i-1])
+            print(ret, op, val)
+            ret, val = cast_binop(ret, val, self.builder)
+            if op==">>":
+                ret = self.builder.ashr(val, ret)
+            elif op=="<<":
+                ret = self.builder.shl(val, ret)
+        return ret
     def ref_type(self, t):
         k=self.visit(t).as_pointer()
         print("ref", k)
@@ -113,13 +189,15 @@ class FileParser(Interpreter):
     def lambdef(self, params, ret_type, fnblock):
         return self.funcdef(f"anon_{uuid.uuid4()}", params, ret_type, fnblock)
     def funcdef(self, name, params, ret_type, fnblock: Tree):
-        name = self.visit(name) if not isinstance(name, str) else name
+        name = self.fn_prefix+self.visit(name) if not isinstance(name, str) else name
         if name=="main": name="vrmain"
         params = self.visit(params) if params is not None else {}
         ret = self.visit(ret_type) if ret_type is not None else ir.VoidType()
         print("func", name, params, ret)
         func_type = ir.FunctionType(ret, params.values())
         func = ir.Function(self.module, func_type, name)
+        if name!="vrmain":
+            func.linkage = "internal"
         self.vars[name] = {"scope": ir.global_context, "type": func_type, "value": func, "const": True}
         for arg, name_ in zip(func.args, params.keys()):
             arg.name = name_
@@ -152,7 +230,10 @@ class FileParser(Interpreter):
     def var(self, v):
         va = self.visit(v)
         print("var", va)
-        var = self.vars[va]
+        try:
+            var = self.vars[va]
+        except KeyError:
+            return self.structs[va]["ir"]
         if not var["const"]:
             return self.builder.load(var["value"])
         return var["value"]
@@ -164,9 +245,16 @@ class FileParser(Interpreter):
             res = self.__print(args)
             if res is not None: 
                 return res
+        if expr == self.vars["println"]["value"]:
+            res = self.__println(args)
+            if res is not None:
+                return res
         return self.builder.call(expr, list(map(lambda kv: cast(kv[1], expr.function_type.args[kv[0]], self.builder), enumerate(args))))
-    def string(self, s:str):
-        k = (s.lstrip("\"").rstrip("\"")+"\0").replace('\\n','\n')
+    def string(self, s):
+        k = self.visit(s)
+        return self.__string(k)
+    def __string(self, s):
+        k = s+"\0"
         ln = len(k)
         c = ir.Constant(ir.ArrayType(ir.IntType(8), ln), bytearray(k.encode('utf8')))
         cptr = self.builder.alloca(c.type)
@@ -199,16 +287,15 @@ class FileParser(Interpreter):
         ex = self.visit(expr)
         attr = self.visit(atr)
         print("getattr", ex, attr)
-        ptr = self.builder.alloca(ex.type)
         if isinstance(ex.type, ir.PointerType):
             ptr = ex
             if attr=="deref":
                 return self.builder.load(ex)
-        else:
-            self.builder.store(ex,ptr)
-        attrptr = self.builder.gep(ptr,[ir.Constant(ir.IntType(32),0),ir.Constant(ir.IntType(32), self.structs[ex.type.name]["args"][attr]["index"])])
-        print(attrptr.type)
-        return self.builder.load(attrptr)
+            attrptr = self.builder.gep(ptr,[ir.Constant(ir.IntType(32),0),ir.Constant(ir.IntType(32), self.structs[ex.type.name]["args"][attr]["index"])])
+            print(attrptr.type)
+        # else:
+        #     self.builder.store(ex,ptr)
+        return self.builder.extract_value(ex, self.structs[ex.type.name]["args"][attr]["index"])
     def fn_type(self, params, ret):
         pars = self.visit(params) if params is not None else []
         ret = self.visit(ret) if ret is not None else ir.VoidType()
@@ -350,7 +437,7 @@ class FileParser(Interpreter):
         elif op=="*":
             return self.builder.load(ex)
         return ex
-    def classdef(self, name, type_list_generic, params):
+    def classdef(self, name, type_list_generic, params, funcs):
         name = self.visit(name)
         params = self.visit(params) if params is not None else {}
         if type_list_generic is None:
@@ -362,6 +449,11 @@ class FileParser(Interpreter):
             class_ = ir.global_context.get_identified_type(name)
             class_.set_body(*vartypes)
             self.structs[name] = {"ir": class_, "args": classvars}
+            self.fn_prefix += f"{name}::"
+            self.class_, temp = class_, self.class_
+            self.visit(funcs)
+            self.fn_prefix = self.fn_prefix[:-len(name)-2]
+            self.class_ = temp
             return class_
     def decorator(self,name, params):
         name = self.visit(name)
@@ -377,27 +469,52 @@ class FileParser(Interpreter):
             print("building debug for", class_.name)
             fn_ty = ir.FunctionType(ir.VoidType(), [class_])
             fn = ir.Function(self.module, fn_ty, f"print_{class_.name}")
+            fn.linkage = "internal"
             bloc = fn.append_basic_block("entry")
             builder = ir.IRBuilder(bloc)
             temp, self.builder = self.builder, builder
-            self.__print([self.string(f"{class_.name}{{")])
+            self.__print([self.__string(f"{class_.name}{{")])
             cvars:dict = self.structs[class_.name]["args"]
             if len(cvars)>=1:
                 cvars_items = list(cvars.items()) 
                 cvar, cvar_dat = cvars_items[0]
                 print("cvar", cvar, cvar_dat)
-                self.__print([self.string(cvar+":")])
+                self.__print([self.__string(cvar+":")])
                 ptr = self.builder.alloca(class_)
                 self.builder.store(fn.args[0], ptr)
                 self.__print([self.builder.load(self.builder.gep(ptr, [ir.Constant(ir.IntType(32),0),ir.Constant(ir.IntType(32),cvar_dat["index"])]))])
                 for cvar, cvar_dat in cvars_items[1:]:
                     print("cvar", cvar, cvar_dat)
-                    self.__print([self.string(", "+cvar+":")])
+                    self.__print([self.__string(", "+cvar+":")])
                     self.__print([self.builder.load(self.builder.gep(ptr, [ir.Constant(ir.IntType(32),0),ir.Constant(ir.IntType(32),cvar_dat["index"])]))])
-            self.__print([self.string("}")])
+            self.__print([self.__string("}")])
             self.builder.ret_void()
             self.builder = temp
             self.vars[f"print_{class_.name}"] = {"scope": ir.global_context, "type": fn_ty, "value": fn, "const": True}
+            fn_ty = ir.FunctionType(ir.VoidType(), [class_])
+            fn = ir.Function(self.module, fn_ty, f"println_{class_.name}")
+            fn.linkage = "internal"
+            bloc = fn.append_basic_block("entry")
+            builder = ir.IRBuilder(bloc)
+            temp, self.builder = self.builder, builder
+            self.__print([self.__string(f"{class_.name}{{")])
+            cvars:dict = self.structs[class_.name]["args"]
+            if len(cvars)>=1:
+                cvars_items = list(cvars.items()) 
+                cvar, cvar_dat = cvars_items[0]
+                print("cvar", cvar, cvar_dat)
+                self.__print([self.__string(cvar+":")])
+                ptr = self.builder.alloca(class_)
+                self.builder.store(fn.args[0], ptr)
+                self.__print([self.builder.load(self.builder.gep(ptr, [ir.Constant(ir.IntType(32),0),ir.Constant(ir.IntType(32),cvar_dat["index"])]))])
+                for cvar, cvar_dat in cvars_items[1:]:
+                    print("cvar", cvar, cvar_dat)
+                    self.__print([self.__string(", "+cvar+":")])
+                    self.__print([self.builder.load(self.builder.gep(ptr, [ir.Constant(ir.IntType(32),0),ir.Constant(ir.IntType(32),cvar_dat["index"])]))])
+            self.__println([self.__string("}")])
+            self.builder.ret_void()
+            self.builder = temp
+            self.vars[f"println_{class_.name}"] = {"scope": ir.global_context, "type": fn_ty, "value": fn, "const": True}
         return decs
     def insexpr(self, type, args):
         typ = self.visit(type)
@@ -407,6 +524,114 @@ class FileParser(Interpreter):
         for i, arg in enumerate(args):
             self.builder.store(arg, self.builder.gep(ptr, [ir.Constant(ir.IntType(32),0),ir.Constant(ir.IntType(32),i)]))
         return self.builder.load(ptr)
+    def band_expr(self, *operands):
+        ret = self.visit(operands[0])
+        for i in range(1,len(operands)):
+            val = self.visit(operands[i])
+            print(ret, val)
+            ret, val = cast_binop(ret, val, self.builder)
+            ret = self.builder.and_(ret, val)
+        return ret
+    def bor_expr(self, *operands):
+        ret = self.visit(operands[0])
+        for i in range(1,len(operands)):
+            val = self.visit(operands[i])
+            print(ret, val)
+            ret, val = cast_binop(ret, val, self.builder)
+            ret = self.builder.or_(ret, val)
+        return ret
+    def bxor_expr(self, *operands):
+        ret = self.visit(operands[0])
+        for i in range(1,len(operands)):
+            val = self.visit(operands[i])
+            print(ret, val)
+            ret, val = cast_binop(ret, val, self.builder)
+            ret = self.builder.xor(ret, val)
+        return ret
+    def not_expr(self, expr):
+        ex = self.visit(expr)
+        return self.builder.not_(ex)
+    def land_expr(self, *operands):
+        ret = self.visit(operands[0])
+        print("land", operands)
+        for i in range(1,len(operands)):
+            val = self.visit(operands[i])
+            print(ret, val)
+            ret, val = cast_binop(ret, val, self.builder)
+            ret = self.builder.and_(ret, val)
+        return ret
+    def lor_expr(self, *operands):
+        ret = self.visit(operands[0])
+        for i in range(1,len(operands)):
+            val = self.visit(operands[i])
+            print(ret, val)
+            ret, val = cast_binop(ret, val, self.builder)
+            ret = self.builder.or_(ret, val)
+        return ret
+    def line_string(self, *strings):
+        _dbl_q_start, *strs, _dbl_q_end = strings
+        strs = list(map(lambda x: self.visit(x), strs))
+        print("line_string", strs)
+        return "".join(strs)
+    def string_char_simple(self, s):
+        return str(s)
+    def string_char_escaped(self, s):
+        return eval(f'"{s}"')
+    string_char_x = string_char_escaped
+    string_char_utf8 = string_char_escaped
+    string_char_utf16 = string_char_escaped
+    def methodcall(self, expr, method_name, args):
+        expr = self.visit(expr)
+        method_name = self.visit(method_name)
+        args = [expr,*(self.visit(args) if args is not None else [])]
+        print("methodcall", method_name, args)
+        fn = self.vars[f"{expr.type.name}::{method_name}"]["value"]
+        return self.builder.call(fn,  list(map(lambda kv: cast(kv[1], fn.function_type.args[kv[0]], self.builder), enumerate(args))))
+    def self_type(self):
+        print("self", self.class_)
+        return self.class_
+    def enumdef(self, name, _types, members):
+        name = self.visit(name)
+        print("enumdef", name, members)
+        self.class_, temp = ir.global_context.get_identified_type(name), self.class_
+        l = self.visit(members)
+        lnames, ls = zip(*l)
+        ls = filter(lambda x: x is not None, ls)
+        max_size = max(map(lambda x: sum(map(lambda y:y.get_abi_size(llvm.create_target_data("")),x)), ls))
+        print("max_size", max_size)
+        array_ty = ir.ArrayType(ir.IntType(8), max_size)
+        self.class_.set_body(ir.IntType(8), array_ty)
+        self.structs[name] = {"ir": self.class_, "args": {"tag": {"type": ir.IntType(8), "index": 0}, "raw_data": {"type": array_ty, "index": 1}}, "enum_names": lnames}
+        self.class_ = temp
+        return name
+    def normal_enum_mem(self, name):
+        name = self.visit(name)
+        print("enum_mem", name)
+        class_ = ir.global_context.get_identified_type(self.class_.name+"::"+name)
+        class_.set_body(ir.IntType(8))
+        self.structs[self.class_.name+"::"+name] = {"ir": class_, "args": {"tag": {"type": ir.IntType(8), "index": 0}}}
+        return (name, None)
+    def enum_mem_with_params(self, name, type_list):
+        name = self.visit(name)
+        types = self.visit(type_list)
+        print("enum_mem_with_params", name, types)
+        class_ = ir.global_context.get_identified_type(self.class_.name+"::"+name)
+        class_.set_body(ir.IntType(8), *types)
+        self.structs[self.class_.name+"::"+name] = {"ir": class_, "args": {"tag": {"type": ir.IntType(8), "index": 0}}}
+        return (name, types)
+    
+    def enum_insexpr(self, expr, name, args):
+        expr: ir.Type = self.visit(expr)
+        name = self.visit(name)
+        args = self.visit(args) if args is not None else []
+        print("enum_insexpr", expr, name, args)
+        variant_type = self.structs[expr.name+"::"+name]["ir"]
+        varptr = self.builder.alloca(variant_type)
+        self.builder.store(ir.Constant(ir.IntType(8), self.structs[expr.name]["enum_names"].index(name)), self.builder.gep(varptr, [ir.Constant(ir.IntType(32),0),ir.Constant(ir.IntType(32),0)]))
+        for i,arg in enumerate(args):
+            self.builder.store(arg, self.builder.gep(varptr, [ir.Constant(ir.IntType(32),0),ir.Constant(ir.IntType(32),i+1)]))
+        retptr = self.builder.bitcast(varptr, expr.as_pointer())
+        return self.builder.load(retptr)
 def build(args):
     file = args.file
     filename = file.name if file.name!="<stdin>" else "a.out.vrka"
@@ -416,22 +641,31 @@ def build(args):
     llvm.initialize_native_target()
     llvm.initialize_native_asmprinter()
     parser = Lark(open('vrka.lark').read(), parser='lalr', start='file_input', debug=True)
-    print(parser.terminals)
+    #print(parser.terminals)
     tree = parser.parse(file.read())
     file.close()
     print(tree.pretty())
     vis = FileParser(filename)
     vis.visit(tree)
-    print(vis.structs)
+    #print(vis.structs)
     mod = llvm.parse_assembly(str(vis.module))
+    with llvm.create_module_pass_manager() as pm:
+        with llvm.create_pass_manager_builder() as pmb:
+            pmb.populate(pm)
+        pm.run_with_remarks(mod)
+    with llvm.create_function_pass_manager(mod) as fpm:
+        with llvm.create_pass_manager_builder() as pmb:
+            pmb.populate(fpm)
+        for f in mod.functions:
+            fpm.run_with_remarks(f)
+    print(mod)
     tm = llvm.Target.from_default_triple().create_target_machine()
     vis.module.triple = tm.triple
-    ll_mod = str(vis.module)
-    print(ll_mod)
+    
     if args.emit:
         if "llvm" in args.emit:
             with open(filename_path.with_suffix(".ll"), 'w') as f:
-                f.write(ll_mod)
+                f.write(str(mod))
         if "assembly" in args.emit:
             with open(filename_path.with_suffix(".s"), "w") as f:
                 f.write(tm.emit_assembly(mod))
@@ -449,6 +683,14 @@ def run(args):
     os.system(f"./{binary}")
     os.remove(binary)
     os.remove(binary+".o")
+def parse_only(args):
+    file = args.file
+    parser = Lark(open('vrka.lark').read(), parser='lalr', start=args.start_rule, debug=True)
+    tree = parser.parse(file.read())
+    file.close()
+    print(tree.pretty())
+    #vst=FileParser("test")
+    #vst.visit(tree)
 if __name__=="__main__": 
     VERSION = "version 0.0.5"
     parser = argparse.ArgumentParser("vrkac",description="vrka compiler", epilog=VERSION)
@@ -460,6 +702,10 @@ if __name__=="__main__":
     run_parser = subparsers_building.add_parser("run", aliases=["r"], epilog=VERSION)
     run_parser.add_argument("file", type=argparse.FileType())
     run_parser.set_defaults(func=run, emit=None)
+    parse_parser = subparsers_building.add_parser("parse", aliases=["p"], epilog=VERSION)
+    parse_parser.add_argument("file", type=argparse.FileType())
+    parse_parser.add_argument("-s","--start-rule", default="file_input", choices=["file_input","type","line_string"])
+    parse_parser.set_defaults(func=parse_only)
     args = parser.parse_args()
     if "func" in args:
         args.func(args)

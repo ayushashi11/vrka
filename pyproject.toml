@@ -8,10 +8,11 @@ readme = "README.md"
 [tool.poetry.dependencies]
 python = "^3.12"
 lark = "^1.1.9"
-llvmlite = {path = "llvmlite/llvmite/"}
 werkzeug = "^3.0.2"
 alg-types = "^0.1.1"
 uuid = "^1.30"
+colorama = "^0.4.6"
+llvmlite = "^0.42.0"
 
 
 [build-system]
