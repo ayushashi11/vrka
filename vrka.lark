@@ -15,31 +15,30 @@ enum_members: enum_member ("," enum_member)*
            | name "=" expr -> enum_mem_with_val
 async_funcdef: "async" funcdef
 funcdef: "def" name ["(" parameters ")"] ["->" type] block
-parameters: typedparams [optionalparams]
+parameters: typedparams ["," optionalparams]
           | optionalparams
 typedparams: typedparam ("," typedparam)*
 optionalparams: optionalparam ("," optionalparams)*
 optionalparam: name ":" optional_type
 typedparam: name ":" type_non_optional
 async_lambdef: "async" lambdef
-lambdef: "lambda" ["(" parameters ")"] ["->" type] block_lamb
-?stmt: simple_stmt | compound_stmt
-?simple_stmt: small_stmt (";" small_stmt)* [";"]
-?small_stmt: (expr_stmt | assign_stmt | flow_stmt | assert_stmt) //| global_stmt | nonlocal_stmt | pass_stmt | del_stmt | import_stmt
+lambdef: "lambda" ["(" parameters ")"] ["->" type] block 
+?stmt: ( simple_stmt | compound_stmt )
+?simple_stmt: (expr_stmt | assign_stmt | flow_stmt | assert_stmt | return_stmt) ";"//| global_stmt | nonlocal_stmt | pass_stmt | del_stmt | import_stmt
 expr_stmt: exprlist
 ?assign_stmt: assign
 assign: assign_left "=" expr//exprlist "=" exprlist
 // assign: testlist_star_expr ("=" (yield_expr|testlist_star_expr))+
 // augassign: testlist_star_expr augassign_op testlist
-?assign_left: [mut] name -> assign_left_normal
+?assign_left: pattern_expr                   -> assign_left_normal
            | atom_expr "[" subscriptlist "]" -> assign_left_subscript
            | getattrib
 mut: "mut"
 !augassign_op: "+=" | "-=" | "*=" | "@=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | "**=" | "//="
-?flow_stmt: break_stmt | continue_stmt | return_stmt //| raise_stmt | yield_stmt
+?flow_stmt: break_stmt | continue_stmt  //| raise_stmt | yield_stmt
 break_stmt: "break" name?
 continue_stmt: "continue" name?
-return_stmt: "return" [exprlist]
+return_stmt: RETURN [exprlist]
 import_stmt: "import" ("*" | "(" import_as_names ")" | import_as_name) ["from" (dots? name_dotted | dots)]
 !dots: "."+
 import_as_name: name ["as" name]
@@ -63,9 +62,38 @@ for_stmt: name? "for" exprlist "in" exprlist block ["else" block]
 with_stmt: "with" with_items  block
 with_items: with_item ("," with_item)*
 with_item: expr ["as" name]
-?block_lamb: ":" simple_stmt
-           | block 
-block: "{" stmt* "}"
+//------pattern matching-----/
+list_pattern_inner: [lp_left] ["," ellipsis ["," lp_right]]
+                  | ellipsis ["," lp_right]
+
+ellipsis: "..." [name]
+lp_left: list_{pattern_expr}
+lp_right: list_{pattern_expr}
+pattern_expr_list: pattern_expr | pattern_expr (("," pattern_expr)+ [","] | ",")
+?pattern_expr: name "{" [pattern_expr_list] "}"                 -> struct_pattern
+            | "*" pattern_expr                                  -> ref_pattern
+            | name "::" name ["{" pattern_expr_list "}"]        -> enum_pattern
+            | "[" list_pattern_inner "]"                        -> list_pattern
+            | pattern_expr ("|" pattern_expr)+                  -> multi_option 
+            | pattern_atom
+
+?pattern_atom: number
+            | bind
+            | "nil"                    -> const_nil
+            | "true"                   -> const_true
+            | "false"                  -> const_false
+            | line_string
+            | range
+            | "_"                      -> bind_any
+            | string_char
+range: number ".." number
+?bind: name ":" pattern_expr -> bind_type
+    | bind_name
+bind_name: [mut] name
+//---------------------------/
+
+block: ":" expr
+     | "{" stmt* [expr] "}"
 ?exprlist: expr | exprlist_tuple
 exprlist_tuple: expr (("," expr)+ [","] | ",")
 ?expr: lor_expr
@@ -75,10 +103,12 @@ exprlist_tuple: expr (("," expr)+ [","] | ",")
 //?test_nocond: or_test 
 
 ?lor_expr: land_expr ("or" land_expr)*
-?land_expr: not_expr_ ("and" not_expr_)*
+?land_expr: pattern_match ("and" pattern_match)*
+?pattern_match: bor_expr "is" pattern_expr -> pattern
+             | not_expr_
 ?not_expr_: "not" not_expr_ -> not_expr
          | comparison
-?comparison: bor_expr (comp_op bor_expr)*
+?comparison: bor_expr (_comp_op bor_expr)*
 //star_expr: "*" expr
 ?bor_expr: bxor_expr ("|" bxor_expr)*
 ?bxor_expr: band_expr ("^" band_expr)*
@@ -92,11 +122,12 @@ exprlist_tuple: expr (("," expr)+ [","] | ",")
 ?await_expr: AWAIT? atom_expr
 ?atom_expr: atom_expr "(" [arguments] ")"               -> funccall
           | atom_expr "." name "(" [arguments] ")"      -> methodcall
-          | atom_expr "::" "{" arguments "}"            -> insexpr 
-          | atom_expr "::" name ["{" arguments "}"]     -> enum_insexpr
+          | type_init "{" arguments "}"                 -> insexpr 
+          | type_init "::" name ["{" arguments "}"]     -> enum_insexpr
           | atom_expr "[" subscriptlist "]"             -> getsubscrip
           | getattrib
           | atom
+          | "{" stmt+ expr "}"                        -> block_expr
 getattrib: atom_expr "." name
 ?subscriptlist: subscript
               | subscript (("," subscript)+ [","] | ",") -> subscript_tuple
@@ -104,17 +135,19 @@ getattrib: atom_expr "." name
 sliceop: ".." [expr]
 key_value: expr ":" expr
 key_values: key_value ("," key_value)*
-?atom: "[" exprlist? "]" -> list
+?atom: "[" [list_{expr}] "]"        -> list_expr
      | "#" "{" key_values? "}"  -> dictionary
      | name                     -> var
      | type_init
      | number
      | string_concat
      | "(" expr ")"
-     | "..."                    -> ellipsis
-     | "None"                   -> const_none
-     | "True"                   -> const_true
-     | "False"                  -> const_false
+     | "nil"                    -> const_nil
+     | "()"                     -> const_unit
+     | "true"                   -> const_true
+     | "false"                  -> const_false
+     | string_char              -> char
+     //| "..."                    -> ellipsis
 // "(" yield_expr ")"
 //      | "(" _tuple_inner? ")" -> tuple
 //      | "(" comprehension{test_or_star_expr} ")" -> tuple_comprehension
@@ -125,13 +158,13 @@ key_values: key_value ("," key_value)*
 //      | "{" _exprlist "}" -> set
 //      | "{" comprehension{test} "}" -> set_comprehension
 ?string_concat: string+
-!_unary_op: "+"|"-"|"~"|"&"
+!_unary_op: "-"|"~"|"&"|"*"
 !_add_op: "+"|"-"
 !_shift_op: "<<"|">>"
-!_mul_op: "*"|"@"|"/"|"%"
+!_mul_op: "*"|"/"|"%"
 // <> isn't actually a valid comparison operator in Python. It's here for the
 // sake of a __future__ import described in PEP 401 (which really works :-)
-!comp_op: "<"|">"|"=="|">="|"<="|"<>"|"!="|"in"|"not" "in"
+!_comp_op: "<"|">"|"=="|">="|"<="|"<>"|"!="|"in"|"not" "in"
 AWAIT: "await"
 name_typed: name ":" type
 name_expr: name "=" expr
@@ -160,21 +193,29 @@ generic_type: proper_type ["<" list_{type} ">"]
 ?proper_type: type_name_dotted
 type_name_dotted: type_name ("." type_name)*
 name_dotted: name ("." name)*
-number: (DEC_NUMBER | HEX_NUMBER | BIN_NUMBER | OCT_NUMBER | FLOAT_NUMBER | IMAG_NUMBER)["'" type]
-string: line_string | LONG_STRING
-//lex
+number: (DEC_NUMBER | HEX_NUMBER | BIN_NUMBER | OCT_NUMBER | FLOAT_NUMBER | IMAG_NUMBER)[type]
+string: line_string
+      | /r(#*)("+)(.*)\2\1/is  -> raw_string
 
+//lex
+%import common.NEWLINE
 %ignore /[ \f\t\r\n]+/  // WS
 //%ignore /\\[\t \f]*\r?\n/   // LINE_CONT
 %ignore COMMENT
 
 
 // Python terminals
-!line_string: "\"" string_char* "\""
-!string_char: STRING_CHAR_UTF16         -> string_char_utf16
+!line_string: "\"" string_chars* "\""
+!string_chars: STRING_CHAR_UTF16         -> string_char_utf16
             | STRING_CHAR_UTF8          -> string_char_utf8
             | STRING_CHAR_X             -> string_char_x
             | STRING_CHARS_SIMPLE       -> string_char_simple
+            | STRING_CHAR_ESCAPED       -> string_char_escaped
+string_char: "'" string_char_ "'"
+!string_char_: STRING_CHAR_UTF16         -> string_char_utf16
+            | STRING_CHAR_UTF8          -> string_char_utf8
+            | STRING_CHAR_X             -> string_char_x
+            | STRING_CHAR_SIMPLE        -> string_char_simple
             | STRING_CHAR_ESCAPED       -> string_char_escaped
 !name: NAME
      | "@" line_string -> string_name
@@ -183,18 +224,23 @@ string: line_string | LONG_STRING
           | "float"     -> float_type_name
           | "bool"      -> bool_type_name
           | "double"    -> double_type_name
+          | "void"      -> void_type_name
+          | "char"      -> char_type_name
+          | "()"        -> unit_type_name
           | TYPE_NAME
-NAME: /[^\W\d]\w*/
-TYPE_NAME: /[^\W\d]\w*/
 
+NAME: /(?!(return|break|continue))[^\W\d]\w*/
+TYPE_NAME: /(?!(return|break|continue))[^\W\d]\w*/
+RETURN: "return"
 COMMENT: /#[^\n]*/
 
 STRING_CHAR_ESCAPED: "\\" /[abfnrtv"'\\]/
 STRING_CHAR_UTF16: "\\U" /[0-9a-fA-F]{8}/
 STRING_CHAR_UTF8: "\\u" /[0-9a-fA-F]{4}/
 STRING_CHAR_X: "\\x" /[0-9a-fA-F]{2}/
-STRING_CHARS_SIMPLE: /([^"\\]+)/i //To fix: this cant capture newline and tab and all
-LONG_STRING: /([ubf]?r?p?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')/is
+STRING_CHARS_SIMPLE: /([^"\\]+)/i
+STRING_CHAR_SIMPLE: /([^'\\])/i
+//LONG_STRING: /([ubf]?r?p?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')/is
 
 _SPECIAL_DEC: "0".."9"        ("_"?  "0".."9"                       )*
 DEC_NUMBER:   "1".."9"        ("_"?  "0".."9"                       )*
@@ -205,5 +251,5 @@ BIN_NUMBER.2: "0" ("b" | "B") ("_"?  "0".."1"                       )+
 
 _EXP: ("e"|"E") ["+" | "-"] _SPECIAL_DEC
 DECIMAL: "." _SPECIAL_DEC | _SPECIAL_DEC "." _SPECIAL_DEC?
-FLOAT_NUMBER.2: _SPECIAL_DEC _EXP | DECIMAL _EXP? | "inf" | "-inf"
+FLOAT_NUMBER.2: _SPECIAL_DEC _EXP | DECIMAL _EXP? | "inf" | "-inf" | "nan"
 IMAG_NUMBER.2: (_SPECIAL_DEC      | FLOAT_NUMBER) ("J" | "j")

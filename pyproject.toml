@@ -13,6 +13,7 @@ alg-types = "^0.1.1"
 uuid = "^1.30"
 colorama = "^0.4.6"
 llvmlite = "^0.42.0"
+tqdm = "^4.66.4"
 
 
 [build-system]

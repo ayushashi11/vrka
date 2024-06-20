@@ -4,9 +4,34 @@ from dataclasses import dataclass
 from .utils import Result
 from .v_types import VrType
 
-@alg
+@dataclass
 class Context:
     pass
+@dataclass
+class Global(Context):
+    pass
+@dataclass
+class FunctionLocal(Context):
+    name: str
+
+@dataclass
+class BlockLocal(Context):
+    pass
+
+def hash_context(context: Context)->int:
+    if isinstance(context, Global) or isinstance(context, BlockLocal):
+        return id(Global)
+    elif isinstance(context, FunctionLocal):
+        return hash(context.name)
+    else:
+        raise ValueError(f"Unknown context type {context}")
+Context.__hash__ = hash_context #type:ignore
+FunctionLocal.__hash__ = hash_context #type:ignore
+Global.__hash__ = hash_context #type:ignore
+BlockLocal.__hash__ = hash_context #type:ignore
+Context.Global = Global #type:ignore
+Context.FunctionLocal = FunctionLocal #type:ignore
+Context.BlockLocal = BlockLocal #type:ignore
 @dataclass
 class Constant:
     value: int|float|str|None|object
@@ -27,11 +52,9 @@ class Expr:
     @variant
     def UnaryExp(exp: Self, op: UnaryOp): ...
     @variant
-    @staticmethod
-    def Constant(constant: Constant): ...
+    def Constant(constant: Constant): ... #type: ignore
     @variant
-    @staticmethod
-    def Var(name: str, context: Context): ...
+    def Var(name: str, context: Context): ... #type:ignore
     @variant
     def Call(func: Self, args: List[Self], optionals: Dict[str, Self]): ...
     @variant
@@ -44,6 +67,14 @@ class Expr:
     def GetAttr(exp: Self, attr: str): ...
     @variant
     def Subscript(exp: Self, subs:Self|Tuple[Self|None, Self|None, Self|None]): ...
+    @variant
+    def Cast(exp:Self): ...
+    @variant
+    def FuncArg(index: int): ... #type:ignore
+    @variant
+    def Alloc(type: VrType, name: str): ...
+    @variant
+    def Block(body: List): ... #type:ignore
 
 @alg
 class AssignLeft:
@@ -67,11 +98,13 @@ class Stmt:
     def IfElse(if_:Expr, then: List[Self], else_: Self|List[Self]|None): ... #type:ignore
     @variant
     def While(cond: Expr, body: List[Self], name: str|None): ... #type:ignore
-
+    @variant
+    def Return(exp: Expr): ...
 @dataclass
 class Function:
     name: str
     params: Dict[str, VrType]
-    optionals: Dict[str, Tuple[VrType, Expr]]
+    optionals: Dict[str, VrType]#Tuple[VrType, Expr]]
     body: List[Stmt]
     return_type: VrType
+    vars: Optional[dict] = None

@@ -31,13 +31,19 @@ class VrType:
     @variant
     def UnsignedInt(len: int): ...
     @variant
+    def Char(): ...
+    @variant
     def Float(): ...
     @variant
     def Double(): ...
     @variant
     def String(): ...
     @variant
+    def Bool(): ...
+    @variant
     def Void(): ...
+    @variant
+    def Unit(): ...
     @variant
     def Pointer(to: Self): ...
     @variant
@@ -54,11 +60,11 @@ class VrType:
     def check_eq(self, other: Self) -> bool:
         if self.__class__ == VrType.Unknown and other.__class__ != VrType.Unknown:
             for var in self.vars:
-                var.type = other
+                var.return_type = other
             return True
         if self.__class__ != VrType.Unknown and other.__class__ == VrType.Unknown:
             for var in other.vars:
-                var.type = self
+                var.return_type = self
             return True
         if self.__class__ != other.__class__:
             return False
@@ -81,5 +87,10 @@ class VrType:
             return self.opts.check_eq(other.opts)
         if self.__class__ == VrType.List and other.__class__ == VrType.List:
             return self.of.check_eq(other.of)
+        if self.__class__ == other.__class__ and self.__class__ in [VrType.Char, VrType.Float, VrType.Double, VrType.String, VrType.Bool, VrType.Void, VrType.Unit]:
+            return True
         return False
     
+#opaque type for Unit
+UnitType = ir.LiteralStructType([], packed=True)
+Unit = ir.Constant(UnitType, [])
