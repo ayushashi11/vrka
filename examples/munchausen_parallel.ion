@@ -1,0 +1,50 @@
+fn find_next(cur_start: Int, end_val: Int, powers: [Int]) -> Int:
+    let cur = cur_start
+    while cur < end_val:
+        let n = cur
+        let total = 0
+        while n > 0:
+            let digit = n % 10
+            total = total + powers[digit]
+            if total > cur:
+                n = 0
+            else:
+                n = n / 10
+        if total == cur:
+            if cur > 0:
+                return cur
+        cur = cur + 1
+    return -1
+
+fn worker(start_n: Int, end_n: Int, powers: [Int], parent_pid: Int):
+    let cur = start_n
+    while cur < end_n:
+        let found = find_next(cur, end_n, powers)
+        if found < 0:
+            cur = end_n
+        else:
+            println(found)
+            cur = found + 1
+    send(parent_pid, 1)
+
+fn main():
+    let powers = [0, 1, 4, 27, 256, 3125, 46656, 823543, 16777216, 387420489]
+    let n_limit = 10000000
+    let num_workers = 16
+    let chunk = n_limit / num_workers
+
+    let t0 = time()
+    let i = 0
+    while i < num_workers:
+        let s = i * chunk
+        let e = s + chunk
+        let pid = spawn worker(s, e, powers, 0)
+        i = i + 1
+
+    let done = 0
+    while done < num_workers:
+        let msg = receive()
+        done = done + 1
+    let t1 = time()
+    let elapsed = t1 - t0
+    println("Time elapsed (s): ", elapsed)

@@ -1,0 +1,12 @@
+[package]
+name = "lang"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+vmm = { path = "../ionvm/vmm" }
+vm-ffi = { path = "../ionvm/vm-ffi" }
+thiserror = "2.0"
+anyhow = "1.0"
+
+

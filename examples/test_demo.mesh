@@ -1,0 +1,31 @@
+# Demo file to test Mesh LSP and Formatter in VS Code
+
+fn calculate_powers(limit: Int) -> [Int]:
+    let arr = [0, 1, 4, 27, 256, 3125]
+    let total = 0
+    let i = 0
+    while i < arr.length:
+        let v = arr[i]
+        total = total + v
+        i = i + 1
+    return arr
+
+fn process_data(tag: String, count: Int) -> String:
+    let prefix = "[RESULT]"
+    if count > 0:
+        return prefix + tag + ": active"
+    else:
+        return prefix + tag + ": inactive"
+
+fn worker():
+    println("worker started...")
+    let msg = receive()
+    println("worker received: ", msg)
+
+fn main():
+    println("Running power calculation...")
+    let powers = calculate_powers(6)
+    println("Powers calculated: ", powers)
+    let status = process_data("MESH_CORE", powers.length)
+    println("Status: ", status)
+

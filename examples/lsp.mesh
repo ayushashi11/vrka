@@ -1,0 +1,87 @@
+# Mesh Language Server Protocol (LSP) Server
+# Implements JSON-RPC 2.0 framing, document synchronization, and textDocument/formatting.
+
+import "formatter.mesh";
+
+fn send_response(client_fd: Int, id: Any, result_json: String):
+    let body = "{\"jsonrpc\":\"2.0\",\"id\":" + to_string(id) + ",\"result\":" + result_json + "}"
+    let len_str = to_string(str_len(body))
+    let msg = "Content-Length: " + len_str + "\r\n\r\n" + body
+    tcp_send(client_fd, msg)
+
+fn handle_lsp_message(client_fd: Int, raw: String, current_doc: String) -> String:
+    let idx = str_index_of(raw, "{")
+    if idx < 0:
+        return current_doc
+
+    let body = str_slice(raw, idx, str_len(raw))
+    let method = json_get(body, "method")
+    let id = json_get(body, "id")
+
+    if method == "initialize":
+        let caps = "{\"capabilities\":{\"textDocumentSync\":1,\"documentFormattingProvider\":true,\"hoverProvider\":true}}"
+        send_response(client_fd, id, caps)
+        return current_doc
+
+    if method == "textDocument/didOpen":
+        let doc = json_get(body, "params.textDocument.text")
+        if str_len(doc) > 0:
+            return doc
+        return current_doc
+
+    if method == "textDocument/didChange":
+        let doc = json_get(body, "params.contentChanges.0.text")
+        if str_len(doc) == 0:
+            doc = json_get(body, "params.textDocument.text")
+        if str_len(doc) > 0:
+            return doc
+        return current_doc
+
+    if method == "textDocument/formatting":
+        let doc = json_get(body, "params.textDocument.text")
+        if str_len(doc) == 0:
+            doc = current_doc
+        let formatted = mesh_format(doc)
+        let esc = str_replace(formatted, "\\", "\\\\")
+        esc = str_replace(esc, "\"", "\\\"")
+        esc = str_replace(esc, "\n", "\\n")
+        let edit = "[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":999999,\"character\":0}},\"newText\":\"" + esc + "\"}]"
+        send_response(client_fd, id, edit)
+        return doc
+
+    if method == "textDocument/hover":
+        let hover_res = "{\"contents\":\"Mesh Programming Language Toolchain\"}"
+        send_response(client_fd, id, hover_res)
+        return current_doc
+
+    if method == "shutdown":
+        send_response(client_fd, id, "null")
+        return current_doc
+
+    return current_doc
+
+fn serve_client(client_fd: Int):
+    let doc = ""
+    let running = true
+    while running:
+        let chunk = tcp_recv(client_fd, 8192)
+        if str_len(chunk) == 0:
+            running = false
+        else:
+            let method = json_get(chunk, "method")
+            if method == "exit":
+                running = false
+            else:
+                doc = handle_lsp_message(client_fd, chunk, doc)
+    tcp_close(client_fd)
+
+fn main():
+    let port = 9257
+    println("Starting Mesh LSP Server on port ", port, "...")
+    let listener = tcp_listen(port)
+    let running = true
+    while running:
+        let client_fd = tcp_accept(listener)
+        println("Accepted LSP client connection!")
+        serve_client(client_fd)
+        println("Client session completed.")

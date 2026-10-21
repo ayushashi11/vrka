@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Mesh Language Server Protocol (LSP) Server Launcher
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LANG_BIN="$BIN_DIR/../target/release/lang"
+LSP_SCRIPT="$BIN_DIR/../examples/lsp.mesh"
+
+exec "$LANG_BIN" --run "$LSP_SCRIPT" "$@"
