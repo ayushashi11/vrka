@@ -989,7 +989,11 @@ mod tests {
         inferrer.register_module_declarations(&module);
 
         // Infer get_x
-        let get_x_fn = ssa.functions.iter().find(|f| f.name == "get_x").unwrap();
+        let get_x_fn = ssa
+            .functions
+            .iter()
+            .find(|f| f.name.ends_with(".get_x"))
+            .unwrap();
         let types_get_x = inferrer.infer_function(get_x_fn).expect("inferred get_x");
         let p_param = get_x_fn.params[0].1;
         match &types_get_x[&p_param] {
@@ -1003,13 +1007,17 @@ mod tests {
         // Register get_x in inferrer globals
         let p_ty = types_get_x[&p_param].clone();
         let ret_ty = types_get_x[&get_x_fn.blocks[0].instructions[0].dst.unwrap()].clone();
-        inferrer.globals.insert("get_x".to_string(), Type::Fn {
+        inferrer.globals.insert(get_x_fn.name.clone(), Type::Fn {
             params: vec![p_ty],
             ret: Box::new(ret_ty),
         });
 
         // Infer caller passing concrete Point
-        let caller_fn = ssa.functions.iter().find(|f| f.name == "caller").unwrap();
+        let caller_fn = ssa
+            .functions
+            .iter()
+            .find(|f| f.name.ends_with(".caller"))
+            .unwrap();
         let caller_types = inferrer.infer_function(caller_fn).expect("inferred caller with Point");
         assert!(caller_types.values().any(|t| *t == Type::Int));
     }
@@ -1039,17 +1047,25 @@ mod tests {
         let mut inferrer = TypeInferrer::new();
         inferrer.register_module_declarations(&module);
 
-        let get_x_fn = ssa.functions.iter().find(|f| f.name == "get_x").unwrap();
+        let get_x_fn = ssa
+            .functions
+            .iter()
+            .find(|f| f.name.ends_with(".get_x"))
+            .unwrap();
         let types_get_x = inferrer.infer_function(get_x_fn).expect("inferred get_x");
         let p_param = get_x_fn.params[0].1;
         let p_ty = types_get_x[&p_param].clone();
         let ret_ty = types_get_x[&get_x_fn.blocks[0].instructions[0].dst.unwrap()].clone();
-        inferrer.globals.insert("get_x".to_string(), Type::Fn {
+        inferrer.globals.insert(get_x_fn.name.clone(), Type::Fn {
             params: vec![p_ty],
             ret: Box::new(ret_ty),
         });
 
-        let caller_fn = ssa.functions.iter().find(|f| f.name == "caller").unwrap();
+        let caller_fn = ssa
+            .functions
+            .iter()
+            .find(|f| f.name.ends_with(".caller"))
+            .unwrap();
         let res = inferrer.infer_function(caller_fn);
         assert!(res.is_err(), "Passing Color (missing field x) must fail type checking!");
         match res.unwrap_err() {
@@ -1058,5 +1074,4 @@ mod tests {
         }
     }
 }
-
 

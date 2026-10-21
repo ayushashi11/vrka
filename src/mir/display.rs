@@ -94,7 +94,8 @@ impl fmt::Display for SsaOp {
                 } else {
                     write!(f, "make_closure @{}", func)
                 }
-            }
+            },
+            SsaOp::FormatValue { val, spec } => write!(f, "format_value {}, {}", val, spec.map_or_else(|| String::from("<no spec>"), |v| format!("{}", v))),
         }
     }
 }

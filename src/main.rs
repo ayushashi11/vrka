@@ -1,6 +1,6 @@
 use anyhow::Context;
 use lang::{
-    build_ssa_program, parse, ClosureAnalysis, CodeEmitter, CompileError, TypeInferrer,
+    build_ssa_program, parse_with_path, ClosureAnalysis, CodeEmitter, CompileError, TypeInferrer,
 };
 use std::env;
 use std::fs;
@@ -115,7 +115,10 @@ fn main() -> anyhow::Result<()> {
     let file_label = file_path.as_deref().unwrap_or("<stdin>");
 
     // ── Pass 1: Lex + Parse ──────────────────────────────────────────────────
-    let module = match parse(&source_code) {
+    let module = match parse_with_path(
+        &source_code,
+        std::path::PathBuf::from(file_label),
+    ) {
         Ok(m) => m,
         Err(e) => {
             let err = CompileError::from(e);

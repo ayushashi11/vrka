@@ -11,6 +11,7 @@ pub struct ResolvedFunction {
     pub name: String,
     pub total_locals: usize,
     pub upvalues: Vec<UpvalueDesc>,
+    pub compiled_name: String,
     pub span: Span,
 }
 
@@ -23,6 +24,7 @@ pub struct ResolvedProgram {
 }
 
 pub struct Resolver {
+    pub start_filename: String,
     pub scopes: ScopeManager,
     pub var_resolutions: HashMap<Span, ResolvedVar>,
     pub completed_functions: Vec<ResolvedFunction>,
@@ -32,13 +34,14 @@ pub struct Resolver {
 }
 
 impl Resolver {
-    pub fn new() -> Self {
-        Self::with_loader(ModuleLoader::new(None))
+    pub fn new(start_filename: String) -> Self {
+        Self::with_loader(start_filename, ModuleLoader::new(None))
     }
 
-    pub fn with_loader(loader: ModuleLoader) -> Self {
+    pub fn with_loader(start_filename: String, loader: ModuleLoader) -> Self {
         Self {
-            scopes: ScopeManager::new(),
+            scopes: ScopeManager::new(start_filename.clone()),
+            start_filename,
             var_resolutions: HashMap::new(),
             completed_functions: Vec::new(),
             top_level_consts: HashMap::new(),
@@ -52,7 +55,13 @@ impl Resolver {
         for item in &module.items {
             match item {
                 Item::Decl(Decl::Fn(f)) => {
-                    self.scopes.register_global(f.name.clone(), f.span)?;
+                    let module_path = module.path.to_string_lossy().to_string();
+                    let compiled_name = self.compiled_function_name(&module_path, &f.name);
+                    self.scopes.register_global_compiled(
+                        f.name.clone(),
+                        compiled_name,
+                        f.span,
+                    )?;
                 }
                 Item::Decl(Decl::Struct(s)) => {
                     self.scopes.register_global(s.name.clone(), s.span)?;
@@ -84,11 +93,11 @@ impl Resolver {
         for item in &module.items {
             match item {
                 Item::Decl(Decl::Fn(f)) => {
-                    self.resolve_fn_def(f)?;
+                    self.resolve_fn_def(f, module.path.to_string_lossy().to_string())?;
                 }
                 Item::Decl(Decl::Impl(impl_def)) => {
                     for method in &impl_def.methods {
-                        self.resolve_fn_def(method)?;
+                        self.resolve_fn_def(method, impl_compiled_parent(&module.path, impl_def))?;
                     }
                 }
                 Item::Decl(_) => {}
@@ -107,6 +116,7 @@ impl Resolver {
             let global_scope = &self.scopes.function_stack[0];
             self.completed_functions.push(ResolvedFunction {
                 name: "main".to_string(),
+                compiled_name: "main".to_string(),
                 total_locals: global_scope.next_slot,
                 upvalues: global_scope.upvalues.clone(),
                 span: Span { start: 0, end: 0, line: 1, col: 1 },
@@ -145,7 +155,13 @@ impl Resolver {
                     match item {
                         Item::Decl(Decl::Fn(f)) => {
                             if f.name != "main" {
-                                let _ = self.scopes.register_global(f.name.clone(), f.span);
+                                let module_path =
+                                    imported_module.path.to_string_lossy().to_string();
+                                let _ = self.scopes.register_global_compiled(
+                                    f.name.clone(),
+                                    self.compiled_function_name(&module_path, &f.name),
+                                    f.span,
+                                );
                             }
                         }
                         Item::Decl(Decl::Struct(s)) => {
@@ -177,11 +193,14 @@ impl Resolver {
                 for item in &imported_module.items {
                     match item {
                         Item::Decl(Decl::Fn(f)) => {
-                            self.resolve_fn_def(f)?;
+                            self.resolve_fn_def(f, imported_module.path.to_string_lossy().to_string())?;
                         }
                         Item::Decl(Decl::Impl(impl_def)) => {
                             for method in &impl_def.methods {
-                                self.resolve_fn_def(method)?;
+                                self.resolve_fn_def(
+                                    method,
+                                    impl_compiled_parent(&imported_module.path, impl_def),
+                                )?;
                             }
                         }
                         _ => {}
@@ -194,8 +213,9 @@ impl Resolver {
         Ok(())
     }
 
-    fn resolve_fn_def(&mut self, f: &FnDef) -> Result<(), SemaError> {
-        self.scopes.enter_function(f.name.clone());
+    fn resolve_fn_def(&mut self, f: &FnDef, parent: String) -> Result<(), SemaError> {
+        let compiled_name = self.compiled_function_name(&parent, &f.name);
+        self.scopes.enter_function(f.name.clone(), compiled_name.clone());
 
         for param in &f.params {
             self.scopes.current_fn_mut().define_local(param.name.clone(), VarKind::Constant, param.span)?;
@@ -209,9 +229,18 @@ impl Resolver {
             total_locals: fn_scope.next_slot,
             upvalues: fn_scope.upvalues,
             span: f.span,
+            compiled_name,
         });
 
         Ok(())
+    }
+
+    fn compiled_function_name(&self, parent: &str, name: &str) -> String {
+        if name == "main" && parent == self.start_filename {
+            "main".to_string()
+        } else {
+            format!("{}.{}", parent, name)
+        }
     }
 
     fn resolve_block(&mut self, block: &Block) -> Result<(), SemaError> {
@@ -424,7 +453,8 @@ impl Resolver {
             Expr::Receive(_) => Ok(()),
             Expr::Lambda { params, body, span, .. } => {
                 let lambda_name = format!("lambda_{}_{}", span.line, span.col);
-                self.scopes.enter_function(lambda_name.clone());
+                let compiled_name = format!("{}.{}", self.scopes.current_fn().compiled_name, lambda_name);
+                self.scopes.enter_function(lambda_name.clone(), compiled_name);
 
                 for p in params {
                     self.scopes.current_fn_mut().define_local(p.name.clone(), VarKind::Constant, p.span)?;
@@ -438,6 +468,7 @@ impl Resolver {
                     total_locals: lambda_scope.next_slot,
                     upvalues: lambda_scope.upvalues,
                     span: *span,
+                    compiled_name: lambda_scope.compiled_name,
                 });
                 Ok(())
             }
@@ -503,6 +534,23 @@ impl Resolver {
             PatternNode::Wildcard(_) | PatternNode::Literal(_, _) | PatternNode::Range { .. } => {}
         }
         Ok(())
+    }
+}
+
+fn impl_compiled_parent(path: &std::path::Path, impl_def: &ImplDef) -> String {
+    let module_path = path.to_string_lossy();
+    match &impl_def.for_protocol {
+        Some(proto_name) => format!(
+            "{}.{}.#{}",
+            module_path,
+            impl_def.target_type.get_compiled_name(),
+            proto_name.get_compiled_name()
+        ),
+        None => format!(
+            "{}.{}",
+            module_path,
+            impl_def.target_type.get_compiled_name()
+        ),
     }
 }
 
@@ -641,6 +689,69 @@ mod tests {
     }
 
     #[test]
+    fn test_imported_function_name_collisions_use_compiled_names() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!(
+            "mesh_collision_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let first_path = dir.join("first.mesh");
+        let second_path = dir.join("second.mesh");
+        writeln!(
+            std::fs::File::create(&first_path).unwrap(),
+            "fn shared() -> Int: {{ return 11; }}"
+        )
+        .unwrap();
+        writeln!(
+            std::fs::File::create(&second_path).unwrap(),
+            "fn shared() -> Int: {{ return 22; }}"
+        )
+        .unwrap();
+
+        let main_src = format!(
+            r#"
+            import "{}";
+            import "{}";
+            fn main() -> Int: {{
+                return shared();
+            }}
+            "#,
+            first_path.display(),
+            second_path.display()
+        );
+        let module = parse(&main_src).expect("parsed");
+        let resolved =
+            resolve_with_loader(&module, ModuleLoader::new(Some(dir.clone()))).expect("resolved");
+        let ssa = crate::mir::build_ssa_program(&resolved, &module);
+
+        let first_compiled_name = std::fs::canonicalize(&first_path)
+            .unwrap()
+            .to_string_lossy()
+            .to_string()
+            + ".shared";
+        let second_compiled_name = std::fs::canonicalize(&second_path)
+            .unwrap()
+            .to_string_lossy()
+            .to_string()
+            + ".shared";
+        assert!(ssa.functions.iter().any(|function| function.name == first_compiled_name));
+        assert!(ssa.functions.iter().any(|function| function.name == second_compiled_name));
+        assert!(ssa.functions.iter().any(|function| function.name == "main"));
+
+        let bytecode = crate::codegen::CodeEmitter::emit_program(&ssa);
+        let mut vm = vmm::vm::IonVM::new(bytecode).expect("vm init");
+        vm.run().expect("vm run");
+        assert_eq!(vm.entrypoint_return(), Some(vmm::lang::types::Value::Int(11)));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_resolve_import_mesh_path_env() {
         use std::io::Write;
         let dir = std::env::temp_dir().join(format!("mesh_path_test_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
@@ -701,4 +812,3 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
-

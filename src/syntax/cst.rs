@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use super::token::Span;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -84,6 +86,38 @@ impl TypeAnn {
             TypeAnn::Named { span, .. } => *span,
             TypeAnn::Tuple(_, span) => *span,
             TypeAnn::Fn { span, .. } => *span,
+        }
+    }
+    pub fn get_compiled_name(&self) -> String {
+        match self {
+            TypeAnn::Named { name, args, .. } => {
+                if args.is_empty() {
+                    name.clone()
+                } else {
+                    let args_str = args
+                        .iter()
+                        .map(|arg| arg.get_compiled_name())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!("{}<{}>", name, args_str)
+                }
+            }
+            TypeAnn::Tuple(elements, _) => {
+                let elements_str = elements
+                    .iter()
+                    .map(|elem| elem.get_compiled_name())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("({})", elements_str)
+            }
+            TypeAnn::Fn { params, ret, .. } => {
+                let params_str = params
+                    .iter()
+                    .map(|param| param.get_compiled_name())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("Fn({}):{}", params_str, ret.get_compiled_name())
+            }
         }
     }
 }
@@ -380,5 +414,6 @@ pub enum Item {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Module {
     pub items: Vec<Item>,
+    pub path: PathBuf,
     pub span: Span,
 }

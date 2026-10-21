@@ -16,7 +16,7 @@ pub use mir::{
     SsaProgram, SsaTerminator, ValueData, ValueId,
 };
 pub use sema::{resolve, resolve_with_loader, ModuleLoader, ResolvedFunction, ResolvedProgram, ResolvedVar, SemaError, VarKind};
-pub use syntax::{parse, parse_expression, Module, ParseError};
+pub use syntax::{parse, parse_expression, parse_with_path, Module, ParseError};
 pub use types::{RowVarId, Type, TypeEnv, TypeError, TypeInferrer, TypeVarId};
 
 /// Compile source code into IonVM Bytecode
@@ -29,7 +29,12 @@ pub fn compile_with_path(
     source: &str,
     file_path: Option<&std::path::Path>,
 ) -> std::result::Result<vmm::bytecode::instruction::Bytecode, CompileError> {
-    let module = parse(source)?;
+    let module = parse_with_path(
+        source,
+        file_path
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from("<memory>")),
+    )?;
     let loader = sema::ModuleLoader::new(file_path.and_then(|p| p.parent().map(|d| d.to_path_buf())));
     let resolved = sema::resolve_with_loader(&module, loader)?;
     let ssa = build_ssa_program(&resolved, &module);

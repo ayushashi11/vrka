@@ -12,6 +12,7 @@ pub struct LoopCtx {
 
 pub struct SsaBuilder<'a> {
     pub resolved: &'a ResolvedProgram,
+    pub compiled_name: String,
     pub current_func: SsaFunction,
     pub current_bb: BlockId,
     pub var_defs: HashMap<BlockId, HashMap<String, ValueId>>,
@@ -27,13 +28,14 @@ impl<'a> SsaBuilder<'a> {
         ret_type: Option<TypeAnn>,
         span: Span,
     ) -> Self {
-        let current_func = SsaFunction::new(name, ret_type, span);
+        let current_func = SsaFunction::new(name.clone(), ret_type, span);
         let entry_bb = current_func.entry_block;
         let mut var_defs = HashMap::new();
         var_defs.insert(entry_bb, HashMap::new());
 
         Self {
             resolved,
+            compiled_name: name.clone(),
             current_func,
             current_bb: entry_bb,
             var_defs,
@@ -48,9 +50,29 @@ impl<'a> SsaBuilder<'a> {
         func_def: &FnDef,
         out_functions: &mut Vec<SsaFunction>,
     ) -> SsaFunction {
+        let compiled_name = resolved
+            .functions
+            .iter()
+            .find(|function| function.name == func_def.name && function.span == func_def.span)
+            .map(|function| function.compiled_name.clone())
+            .unwrap_or_else(|| func_def.name.clone());
+        Self::build_function_with_compiled_name(
+            resolved,
+            func_def,
+            compiled_name,
+            out_functions,
+        )
+    }
+
+    fn build_function_with_compiled_name(
+        resolved: &'a ResolvedProgram,
+        func_def: &FnDef,
+        compiled_name: String,
+        out_functions: &mut Vec<SsaFunction>,
+    ) -> SsaFunction {
         let mut builder = SsaBuilder::new(
             resolved,
-            func_def.name.clone(),
+            compiled_name,
             func_def.ret_type.clone(),
             func_def.span,
         );
@@ -604,6 +626,7 @@ impl<'a> SsaBuilder<'a> {
             Expr::Lambda { params, body, span, .. } => {
                 // Lambda creates a nested function in SsaProgram
                 let lambda_name = format!("lambda_{}_{}", span.line, span.col);
+                let compiled_name = format!("{}.{}", self.compiled_name, lambda_name);
                 let lambda_fn_def = FnDef {
                     name: lambda_name.clone(),
                     type_params: vec![],
@@ -612,11 +635,16 @@ impl<'a> SsaBuilder<'a> {
                     body: body.clone(),
                     span: *span,
                 };
-                let nested_fn = SsaBuilder::build_function_with_nested(self.resolved, &lambda_fn_def, &mut self.nested_functions);
+                let nested_fn = SsaBuilder::build_function_with_compiled_name(
+                    self.resolved,
+                    &lambda_fn_def,
+                    compiled_name.clone(),
+                    &mut self.nested_functions,
+                );
                 self.nested_functions.push(nested_fn);
 
                 let upvals = self.resolved.functions.iter()
-                    .find(|f| f.name == lambda_name)
+                    .find(|f| f.compiled_name == compiled_name)
                     .map(|f| &f.upvalues);
                 let mut captured_values = Vec::new();
                 if let Some(upvals) = upvals {
@@ -630,7 +658,11 @@ impl<'a> SsaBuilder<'a> {
                     }
                 }
                 if captured_values.is_empty() {
-                    self.emit_inst(SsaOp::GlobalRef(lambda_name.clone()), Some(lambda_name), *span)
+                    self.emit_inst(
+                        SsaOp::GlobalRef(compiled_name.clone()),
+                        Some(compiled_name),
+                        *span,
+                    )
                 } else {
                     let env_val = if let Some(&cached_env) = self.env_cache.get(&captured_values) {
                         cached_env
@@ -645,10 +677,10 @@ impl<'a> SsaBuilder<'a> {
                     };
                     self.emit_inst(
                         SsaOp::MakeClosure {
-                            func: lambda_name.clone(),
+                            func: compiled_name.clone(),
                             env: Some(env_val),
                         },
-                        Some(lambda_name),
+                        Some(compiled_name),
                         *span,
                     )
                 }
@@ -750,14 +782,28 @@ pub fn build_ssa_program(resolved: &ResolvedProgram, module: &Module) -> SsaProg
         match item {
             Item::Decl(Decl::Fn(f)) => {
                 let mut nested = Vec::new();
-                let ssa_fn = SsaBuilder::build_function_with_nested(resolved, f, &mut nested);
+                let compiled_name =
+                    find_compiled_function_name(resolved, &module.path, f, None);
+                let ssa_fn = SsaBuilder::build_function_with_compiled_name(
+                    resolved,
+                    f,
+                    compiled_name,
+                    &mut nested,
+                );
                 functions.extend(nested);
                 functions.push(ssa_fn);
             }
             Item::Decl(Decl::Impl(impl_def)) => {
                 for method in &impl_def.methods {
                     let mut nested = Vec::new();
-                    let ssa_fn = SsaBuilder::build_function_with_nested(resolved, method, &mut nested);
+                    let compiled_name =
+                        find_compiled_function_name(resolved, &module.path, method, Some(impl_def));
+                    let ssa_fn = SsaBuilder::build_function_with_compiled_name(
+                        resolved,
+                        method,
+                        compiled_name,
+                        &mut nested,
+                    );
                     functions.extend(nested);
                     functions.push(ssa_fn);
                 }
@@ -772,7 +818,14 @@ pub fn build_ssa_program(resolved: &ResolvedProgram, module: &Module) -> SsaProg
                 Item::Decl(Decl::Fn(f)) => {
                     if f.name != "main" {
                         let mut nested = Vec::new();
-                        let ssa_fn = SsaBuilder::build_function_with_nested(resolved, f, &mut nested);
+                        let compiled_name =
+                            find_compiled_function_name(resolved, &imp.path, f, None);
+                        let ssa_fn = SsaBuilder::build_function_with_compiled_name(
+                            resolved,
+                            f,
+                            compiled_name,
+                            &mut nested,
+                        );
                         functions.extend(nested);
                         functions.push(ssa_fn);
                     }
@@ -780,7 +833,18 @@ pub fn build_ssa_program(resolved: &ResolvedProgram, module: &Module) -> SsaProg
                 Item::Decl(Decl::Impl(impl_def)) => {
                     for method in &impl_def.methods {
                         let mut nested = Vec::new();
-                        let ssa_fn = SsaBuilder::build_function_with_nested(resolved, method, &mut nested);
+                        let compiled_name = find_compiled_function_name(
+                            resolved,
+                            &imp.path,
+                            method,
+                            Some(impl_def),
+                        );
+                        let ssa_fn = SsaBuilder::build_function_with_compiled_name(
+                            resolved,
+                            method,
+                            compiled_name,
+                            &mut nested,
+                        );
                         functions.extend(nested);
                         functions.push(ssa_fn);
                     }
@@ -825,6 +889,48 @@ pub fn build_ssa_program(resolved: &ResolvedProgram, module: &Module) -> SsaProg
     }
 
     SsaProgram { functions }
+}
+
+fn find_compiled_function_name(
+    resolved: &ResolvedProgram,
+    module_path: &std::path::Path,
+    function: &FnDef,
+    impl_def: Option<&ImplDef>,
+) -> String {
+    let module_path = module_path.to_string_lossy();
+    let parent = if let Some(impl_def) = impl_def {
+        match &impl_def.for_protocol {
+            Some(proto_name) => format!(
+                "{}.{}.#{}",
+                module_path,
+                impl_def.target_type.get_compiled_name(),
+                proto_name.get_compiled_name()
+            ),
+            None => format!(
+                "{}.{}",
+                module_path,
+                impl_def.target_type.get_compiled_name()
+            ),
+        }
+    } else {
+        module_path.to_string()
+    };
+    let expected = if function.name == "main" && impl_def.is_none() {
+        "main".to_string()
+    } else {
+        format!("{}.{}", parent, function.name)
+    };
+
+    resolved
+        .functions
+        .iter()
+        .find(|resolved_function| {
+            resolved_function.name == function.name
+                && resolved_function.span == function.span
+                && resolved_function.compiled_name == expected
+        })
+        .map(|resolved_function| resolved_function.compiled_name.clone())
+        .unwrap_or(expected)
 }
 
 pub fn eval_unary_const(op: UnaryOp, lit: &LitVal) -> Option<LitVal> {
@@ -896,7 +1002,7 @@ mod tests {
         let ssa = build_ssa_program(&resolved, &module);
         assert_eq!(ssa.functions.len(), 1);
         let f = &ssa.functions[0];
-        assert_eq!(f.name, "add");
+        assert_eq!(f.name, resolved.functions[0].compiled_name);
         assert_eq!(f.params.len(), 2);
         // Display LLVM-like IR
         let ir = format!("{}", f);
@@ -971,4 +1077,3 @@ mod tests {
         assert!(ir.contains("phi ["));
     }
 }
-

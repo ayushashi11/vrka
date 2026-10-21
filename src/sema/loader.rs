@@ -1,5 +1,5 @@
 use crate::syntax::cst::Module;
-use crate::syntax::parse;
+use crate::syntax::parse_with_path;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -89,7 +89,8 @@ impl ModuleLoader {
         self.visited.insert(canonical.clone());
 
         let source = fs::read_to_string(&canonical).map_err(|e| format!("Failed to read '{}': {}", canonical.display(), e))?;
-        let module = parse(&source).map_err(|e| format!("Parse error in '{}': {}", canonical.display(), e))?;
+        let module = parse_with_path(&source, canonical.clone())
+            .map_err(|e| format!("Parse error in '{}': {}", canonical.display(), e))?;
 
         Ok((module, canonical))
     }

@@ -27,16 +27,18 @@ pub struct FunctionScope {
     pub upvalues: Vec<UpvalueDesc>,
     pub next_slot: usize,
     pub scope_depth: usize,
+    pub compiled_name: String,
 }
 
 impl FunctionScope {
-    pub fn new(name: String) -> Self {
+    pub fn new(name: String, compiled_name: String) -> Self {
         Self {
             name,
             locals: vec![HashMap::new()],
             upvalues: Vec::new(),
             next_slot: 0,
             scope_depth: 0,
+            compiled_name,
         }
     }
 
@@ -112,12 +114,13 @@ impl FunctionScope {
 pub struct ScopeManager {
     pub function_stack: Vec<FunctionScope>,
     pub globals: HashMap<String, Span>,
+    pub global_compiled_names: HashMap<String, String>,
     pub namespaces: HashMap<String, Vec<String>>, // namespace name -> list of child symbols / namespaces
     pub enum_variants: HashMap<String, (String, Span)>, // variant_name -> (enum_name, span)
 }
 
 impl ScopeManager {
-    pub fn new() -> Self {
+    pub fn new(global_scope_name: String) -> Self {
         let mut namespaces = HashMap::new();
         // Built-in / native namespaces matching IonVM stdlib / FFI
         namespaces.insert("std".to_string(), vec!["io".to_string(), "fs".to_string(), "os".to_string(), "time".to_string(), "net".to_string(), "json".to_string(), "string".to_string()]);
@@ -152,8 +155,9 @@ impl ScopeManager {
         namespaces.insert("io".to_string(), vec!["println".to_string(), "print".to_string(), "read_line".to_string(), "read_stdin".to_string()]);
 
         Self {
-            function_stack: vec![FunctionScope::new("global".to_string())],
+            function_stack: vec![FunctionScope::new("global".to_string(), global_scope_name)],
             globals: HashMap::new(),
+            global_compiled_names: HashMap::new(),
             namespaces,
             enum_variants: HashMap::new(),
         }
@@ -164,6 +168,17 @@ impl ScopeManager {
             return Err(SemaError::duplicate(name, span));
         }
         self.globals.insert(name, span);
+        Ok(())
+    }
+
+    pub fn register_global_compiled(
+        &mut self,
+        name: String,
+        compiled_name: String,
+        span: Span,
+    ) -> Result<(), SemaError> {
+        self.register_global(name.clone(), span)?;
+        self.global_compiled_names.insert(name, compiled_name);
         Ok(())
     }
 
@@ -183,8 +198,8 @@ impl ScopeManager {
         self.function_stack.last_mut().unwrap()
     }
 
-    pub fn enter_function(&mut self, name: String) {
-        self.function_stack.push(FunctionScope::new(name));
+    pub fn enter_function(&mut self, name: String, compiled_name: String) {
+        self.function_stack.push(FunctionScope::new(name, compiled_name));
     }
 
     pub fn exit_function(&mut self) -> FunctionScope {
@@ -214,7 +229,11 @@ impl ScopeManager {
         // 3. Try global symbols
         if self.globals.contains_key(name) {
             return Ok(ResolvedVar::Global {
-                name: name.to_string(),
+                name: self
+                    .global_compiled_names
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| name.to_string()),
                 span,
             });
         }

@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use super::cst::*;
 use super::lexer::{LexMode, Lexer};
 use super::token::{Span, Token, TokenKind};
@@ -94,7 +96,7 @@ impl<'a> Parser<'a> {
 
     // ── Module & Top-level ──────────────────────────────────────────────────
 
-    pub fn parse_module(&mut self) -> Result<Module, ParseError> {
+    pub fn parse_module(&mut self, path: PathBuf) -> Result<Module, ParseError> {
         let start_span = self.current.span;
         let mut items = Vec::new();
 
@@ -108,6 +110,7 @@ impl<'a> Parser<'a> {
         let end_span = self.current.span;
         Ok(Module {
             items,
+            path,
             span: start_span.merge(end_span),
         })
     }
