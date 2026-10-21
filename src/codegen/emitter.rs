@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use vmm::bytecode::instruction::{Bytecode, Instruction, OperandType};
 use vmm::bytecode::opcode::Opcode;
-use vmm::lang::types::{Function, FunctionType, Value};
+use vmm::lang::types::{Function, FunctionType, Object, Protection, Value};
 use vmm::lang::matcher::{ArrayPattern, ListSegment, Pattern};
 
 use crate::codegen::regalloc::RegAlloc;
@@ -38,12 +38,14 @@ pub fn resolve_qualified_name(path: &[String]) -> String {
 
 pub struct CodeEmitter {
     pub functions: Vec<Function>,
+    struct_fields: HashMap<String, Vec<String>>,
 }
 
 impl CodeEmitter {
     pub fn new() -> Self {
         Self {
             functions: Vec::new(),
+            struct_fields: HashMap::new(),
         }
     }
 
@@ -56,6 +58,16 @@ impl CodeEmitter {
         type_maps: Option<&HashMap<String, HashMap<ValueId, Type>>>,
     ) -> Bytecode {
         let mut emitter = CodeEmitter::new();
+        emitter.struct_fields = program
+            .structs
+            .iter()
+            .map(|struct_def| {
+                (
+                    struct_def.name.clone(),
+                    struct_def.fields.iter().map(|field| field.name.clone()).collect(),
+                )
+            })
+            .collect();
         for func in &program.functions {
             let fn_types = type_maps.and_then(|m| m.get(&func.name));
             let compiled = emitter.emit_function_with_types(func, fn_types);
@@ -73,10 +85,47 @@ impl CodeEmitter {
             ));
         }
 
+        let function_by_name: HashMap<String, usize> = emitter
+            .functions
+            .iter()
+            .map(|function| (function.name.clone(), function.argument_count))
+            .collect();
+        let object_inits = program
+            .structs
+            .iter()
+            .map(|struct_def| {
+                let mut object = Object::new(None);
+                for field in &struct_def.fields {
+                    object.set_property(&field.name, Value::Nil, Protection::Writeable);
+                }
+                for (method_name, compiled_name) in &struct_def.methods {
+                    if let Some(argument_count) = function_by_name.get(compiled_name) {
+                        let method_ref = Function::new(
+                            compiled_name.clone(),
+                            Vec::new(),
+                            0,
+                            *argument_count,
+                            FunctionType::Regular,
+                        );
+                        object.set_property(
+                            method_name,
+                            Value::Function(Arc::new(RwLock::new(method_ref))),
+                            Protection::Writeable,
+                        );
+                    }
+                }
+                (
+                    struct_def.compiled_name.clone(),
+                    Arc::new(RwLock::new(object)),
+                )
+            })
+            .collect();
+
         Bytecode {
             functions: emitter.functions,
             entry_point: "main".to_string(),
             native_declarations: vec![],
+            object_inits,
         }
     }
 
@@ -96,8 +145,12 @@ impl CodeEmitter {
         // Pre-scan all constants and global function references in the function
         let mut const_values: HashMap<ValueId, LitVal> = func.const_values.clone();
         let mut global_fn_names: HashMap<ValueId, String> = HashMap::new();
+        let mut value_ops: HashMap<ValueId, SsaOp> = HashMap::new();
         for block in &func.blocks {
             for inst in &block.instructions {
+                if let Some(dst) = inst.dst {
+                    value_ops.insert(dst, inst.op.clone());
+                }
                 match &inst.op {
                     SsaOp::Const(lit) => {
                         if let Some(val_id) = inst.dst {
@@ -169,6 +222,13 @@ impl CodeEmitter {
                     }
                 }
             }
+            if let SsaTerminator::Match { arms, .. } = &block.terminator {
+                for arm in arms {
+                    for (_, binding) in &arm.bindings {
+                        needed.insert(*binding);
+                    }
+                }
+            }
         }
         let regalloc = RegAlloc::allocate_with_needed(func, &needed);
 
@@ -204,7 +264,16 @@ impl CodeEmitter {
 
             // Emit instructions in block
             for inst in &block.instructions {
-                self.emit_instruction(inst, &regalloc, &const_values, &global_fn_names, types, &mut instructions, &mut max_reg);
+                self.emit_instruction(
+                    inst,
+                    &regalloc,
+                    &const_values,
+                    &global_fn_names,
+                    &value_ops,
+                    types,
+                    &mut instructions,
+                    &mut max_reg,
+                );
             }
 
             // Emit terminator
@@ -285,7 +354,12 @@ impl CodeEmitter {
                     operands.push(OperandType::Offset(arms.len() as i64));
 
                     for arm in arms {
-                        let pat = self.lower_pattern(&arm.pattern, &regalloc);
+                        let binding_regs = arm
+                            .bindings
+                            .iter()
+                            .map(|(name, value)| (name.clone(), regalloc.get(*value)))
+                            .collect();
+                        let pat = self.lower_pattern(&arm.pattern, &regalloc, &binding_regs);
                         operands.push(OperandType::Pattern(pat));
                         operands.push(OperandType::Offset(0)); // placeholder
                     }
@@ -440,6 +514,7 @@ impl CodeEmitter {
         regalloc: &RegAlloc,
         const_values: &HashMap<ValueId, LitVal>,
         global_fn_names: &HashMap<ValueId, String>,
+        value_ops: &HashMap<ValueId, SsaOp>,
         types: Option<&HashMap<ValueId, Type>>,
         instructions: &mut Vec<Instruction>,
         max_reg: &mut usize,
@@ -712,7 +787,39 @@ impl CodeEmitter {
                 }
             }
             SsaOp::Call { callee, args } => {
-                if let Some(fn_name) = global_fn_names.get(callee) {
+                let primitive_format = if args.len() == 1 {
+                    match value_ops.get(callee) {
+                        Some(SsaOp::FieldAccess { base, field }) if field == "format" => {
+                            types
+                                .and_then(|types| types.get(base))
+                                .filter(|ty| {
+                                    matches!(ty, Type::Int | Type::Float | Type::Bool | Type::String)
+                                })
+                                .map(|_| (*base, args[0]))
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+
+                if let Some((receiver, spec)) = primitive_format {
+                    let dst = dst_reg.expect("primitive format call requires dst");
+                    let receiver_op = if let Some(lit) = const_values.get(&receiver) {
+                        OperandType::Constant(lit_to_value(lit))
+                    } else {
+                        OperandType::Register(regalloc.get(receiver))
+                    };
+                    let spec_op = if let Some(lit) = const_values.get(&spec) {
+                        OperandType::Constant(lit_to_value(lit))
+                    } else {
+                        OperandType::Register(regalloc.get(spec))
+                    };
+                    instructions.push(Instruction::new(
+                        Opcode::FormatValue,
+                        vec![receiver_op, spec_op, OperandType::Register(dst)],
+                    ));
+                } else if let Some(fn_name) = global_fn_names.get(callee) {
                     if fn_name == "len" && args.len() == 1 {
                         let dst = dst_reg.unwrap_or(0);
                         let arr_op = if let Some(lit) = const_values.get(&args[0]) {
@@ -1111,6 +1218,31 @@ impl CodeEmitter {
                     vec![OperandType::Register(dst), OperandType::RegisterList(reg_list)],
                 ));
             }
+            SsaOp::NewObject { prototype, fields, args, .. } => {
+                let dst = dst_reg.expect("new object requires dst");
+                instructions.push(Instruction::new(
+                    Opcode::NewObject,
+                    vec![
+                        OperandType::Register(dst),
+                        OperandType::Property(prototype.clone()),
+                    ],
+                ));
+                for ((field, _), arg) in fields.iter().zip(args) {
+                    let value = if let Some(lit) = const_values.get(arg) {
+                        OperandType::Constant(lit_to_value(lit))
+                    } else {
+                        OperandType::Register(regalloc.get(*arg))
+                    };
+                    instructions.push(Instruction::new(
+                        Opcode::SetProp,
+                        vec![
+                            OperandType::Register(dst),
+                            OperandType::Property(field.clone()),
+                            value,
+                        ],
+                    ));
+                }
+            }
             SsaOp::Spawn { callee, args } => {
                 let dst = dst_reg.expect("spawn requires dst");
                 let callee_op = if let Some(fn_name) = global_fn_names.get(callee) {
@@ -1153,6 +1285,13 @@ impl CodeEmitter {
                 instructions.push(Instruction::new(
                     Opcode::Receive,
                     vec![OperandType::Register(dst)],
+                ));
+            }
+            SsaOp::This => {
+                let dst = dst_reg.expect("this requires dst");
+                instructions.push(Instruction::new(
+                    Opcode::LoadConst,
+                    vec![OperandType::This, OperandType::Register(dst)],
                 ));
             }
             SsaOp::BuildString(parts) => {
@@ -1203,10 +1342,19 @@ impl CodeEmitter {
         }
     }
 
-    fn lower_pattern(&self, pat: &PatternNode, regalloc: &RegAlloc) -> Pattern {
+    fn lower_pattern(
+        &self,
+        pat: &PatternNode,
+        regalloc: &RegAlloc,
+        binding_regs: &HashMap<String, usize>,
+    ) -> Pattern {
         match pat {
             PatternNode::Wildcard(_) => Pattern::Wildcard,
-            PatternNode::Bind(_, _) => Pattern::Bind(0),
+            PatternNode::Bind(name, _) => Pattern::Bind(
+                *binding_regs
+                    .get(name)
+                    .expect("pattern binding must have an allocated register"),
+            ),
             PatternNode::Literal(lit, _) => {
                 let val = match lit {
                     LitVal::Int(i) => Value::Int(*i),
@@ -1218,7 +1366,12 @@ impl CodeEmitter {
                 Pattern::Literal(val)
             }
             PatternNode::Tuple(elems, _) => {
-                Pattern::Tuple(elems.iter().map(|e| self.lower_pattern(e, regalloc)).collect())
+                Pattern::Tuple(
+                    elems
+                        .iter()
+                        .map(|elem| self.lower_pattern(elem, regalloc, binding_regs))
+                        .collect(),
+                )
             }
             PatternNode::Range { start, end, inclusive, .. } => {
                 let start_val = start.as_ref().and_then(|e| match e.as_ref() {
@@ -1236,10 +1389,14 @@ impl CodeEmitter {
                     .iter()
                     .map(|s| match s {
                         crate::syntax::cst::PatternSegment::Element(p) => {
-                            ListSegment::Element(self.lower_pattern(p, regalloc))
+                            ListSegment::Element(self.lower_pattern(p, regalloc, binding_regs))
                         }
-                        crate::syntax::cst::PatternSegment::BindList(_, _) => {
-                            ListSegment::BindList(0)
+                        crate::syntax::cst::PatternSegment::BindList(name, _) => {
+                            ListSegment::BindList(
+                                *binding_regs
+                                    .get(name)
+                                    .expect("list pattern binding must have an allocated register"),
+                            )
                         }
                         crate::syntax::cst::PatternSegment::WildcardList(_) => {
                             ListSegment::WildcardList
@@ -1248,7 +1405,24 @@ impl CodeEmitter {
                     .collect();
                 Pattern::Array(ArrayPattern { segments: segs })
             }
-            PatternNode::EnumVariant { name, .. } => {
+            PatternNode::EnumVariant { name, args, .. } => {
+                if let Some(fields) = self.struct_fields.get(name) {
+                    if fields.len() != args.len() {
+                        return Pattern::Literal(Value::Bool(false));
+                    }
+                    return Pattern::Object(
+                        fields
+                            .iter()
+                            .zip(args)
+                            .map(|(field, arg)| {
+                                (
+                                    field.clone(),
+                                    self.lower_pattern(arg, regalloc, binding_regs),
+                                )
+                            })
+                            .collect(),
+                    );
+                }
                 let clean_name = name.strip_prefix(':').unwrap_or(name);
                 Pattern::Literal(Value::String(clean_name.to_string()))
             }
@@ -1263,6 +1437,190 @@ mod tests {
     use crate::sema::resolve;
     use crate::mir::build_ssa_program;
     use vmm::vm::IonVM;
+
+    #[test]
+    fn test_struct_constructor_uses_shared_prototype_and_compiled_methods() {
+        let src = r#"
+        struct Point: {
+            x: Int,
+            y: Int,
+        }
+
+        impl Point: {
+            fn describe() -> String: {
+                return "Point prototype method ${self.x}";
+            }
+        }
+
+        impl ToString for Point: {
+            fn to_string() -> String: {
+                return "Point ${self.x}";
+            }
+        }
+
+        fn main() -> String: {
+            let point = Point(40, 2);
+            return point.describe();
+        }
+        "#;
+        let module = parse(src).expect("parsed");
+        let resolved = resolve(&module).expect("resolved");
+        let ssa = build_ssa_program(&resolved, &module);
+        let mut inferrer = crate::TypeInferrer::new();
+        inferrer.register_program_declarations(&resolved, &module);
+        let types = inferrer.infer_program(&ssa).expect("types inferred");
+        let bytecode = CodeEmitter::emit_program_with_types(&ssa, Some(&types));
+
+        assert_eq!(resolved.structs.len(), 1);
+        assert_eq!(resolved.structs[0].compiled_name, "<memory>.Point");
+        {
+            let (prototype_name, prototype) = bytecode
+                .object_inits
+                .iter()
+                .find(|(name, _)| name == "<memory>.Point")
+                .expect("Point load-time prototype emitted");
+            assert_eq!(prototype_name, "<memory>.Point");
+            let prototype = prototype.read().unwrap();
+            assert_eq!(prototype.get_property("x"), Some(Value::Nil));
+            match prototype.get_property("describe") {
+                Some(Value::Function(function)) => {
+                    let function = function.read().unwrap();
+                    assert_eq!(function.name, "<memory>.Point.describe");
+                    assert!(function.instructions.is_empty());
+                }
+                other => panic!("expected origin method on prototype, got {other:?}"),
+            }
+            match prototype.get_property("to_string") {
+                Some(Value::Function(function)) => {
+                    let function = function.read().unwrap();
+                    assert_eq!(function.name, "<memory>.Point.#ToString.to_string");
+                    assert!(function.instructions.is_empty());
+                }
+                other => panic!("expected protocol method on prototype, got {other:?}"),
+            }
+        }
+
+        let mut encoded = Vec::new();
+        vmm::bytecode::serde::write_bytecode(&mut encoded, &bytecode)
+            .expect("serialize struct bytecode");
+        let bytecode = vmm::bytecode::serde::read_bytecode(&mut encoded.as_slice())
+            .expect("deserialize struct bytecode");
+        let mut vm = IonVM::new(bytecode).expect("init vm");
+        vm.run().expect("run vm");
+        assert_eq!(
+            vm.entrypoint_return(),
+            Some(Value::String("Point prototype method 40".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_struct_constructor_pattern_destructures_fields() {
+        let src = r#"
+        struct Point:
+            x: Int
+            y: Int
+
+        fn main() -> String:
+            let point = Point(40, 2)
+            return match point:
+                Point(x, y) => "Point x=${x}, y=${y}"
+                _ => "not a point"
+        "#;
+        let bytecode = crate::compile(src).expect("compile struct pattern");
+        let mut vm = IonVM::new(bytecode).expect("initialize VM");
+        vm.run().expect("run VM");
+        assert_eq!(
+            vm.entrypoint_return(),
+            Some(Value::String("Point x=40, y=2".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_primitive_format_method_uses_vm_formatter() {
+        let src = r#"
+        fn main() -> String:
+            return 255.format("08x")
+        "#;
+        let bytecode = crate::compile(src).expect("compile primitive format call");
+        let mut vm = IonVM::new(bytecode).expect("initialize VM");
+        vm.run().expect("run VM");
+        assert_eq!(
+            vm.entrypoint_return(),
+            Some(Value::String("000000ff".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_struct_to_string_protocol_method_is_bound_to_receiver() {
+        let src = r#"
+        struct Point:
+            x: Int
+
+        impl ToString for Point:
+            fn to_string() -> String:
+                return "Point x=${self.x}"
+
+        fn main() -> String:
+            let point = Point(42)
+            return point.to_string()
+        "#;
+        let bytecode = crate::compile(src).expect("compile ToString implementation");
+        let mut vm = IonVM::new(bytecode).expect("initialize VM");
+        vm.run().expect("run VM");
+        assert_eq!(
+            vm.entrypoint_return(),
+            Some(Value::String("Point x=42".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_jit_string_return_value_is_copied() {
+        let src = r#"
+        fn message() -> String: {
+            return "hello from JIT";
+        }
+
+        fn main() -> String: {
+            return message();
+        }
+        "#;
+        let bytecode = crate::compile(src).expect("compile string-returning function");
+        let mut vm = IonVM::new(bytecode).expect("initialize VM");
+        let message = vm
+            .scheduler
+            .bytecode
+            .functions
+            .iter()
+            .find(|function| function.name.ends_with(".message"))
+            .expect("message function exists");
+        assert!(message.jit_compiled_fn.is_some(), "message should use JIT");
+        vm.run().expect("run VM");
+        assert_eq!(
+            vm.entrypoint_return(),
+            Some(Value::String("hello from JIT".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_struct_constructor_validates_field_count_and_types() {
+        let missing_field = r#"
+        struct Point: { x: Int }
+        fn main() -> Int: {
+            let point = Point();
+            return 0;
+        }
+        "#;
+        assert!(crate::compile(missing_field).is_err());
+
+        let wrong_field_type = r#"
+        struct Point: { x: Int }
+        fn main() -> Int: {
+            let point = Point("not an int");
+            return 0;
+        }
+        "#;
+        assert!(crate::compile(wrong_field_type).is_err());
+    }
 
     #[test]
     fn test_codegen_and_run_simple_add() {
@@ -1596,4 +1954,3 @@ mod tests {
         }
     }
 }
-

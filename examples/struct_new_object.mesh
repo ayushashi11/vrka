@@ -1,0 +1,25 @@
+struct Point: {
+    x: Int,
+    y: Int,
+}
+
+impl Point:
+    fn describe() -> String:
+        return match self:
+            Point(0, 0) => {
+                "Origin"
+            }
+            Point(x, 0) => "On the x-axis at x=${x}"
+            Point(0, y) => "On the y-axis at y=${y}"
+            Point(x, y) => "Point x=${x}, y=${y}"
+
+impl ToString for Point:
+    fn to_string() -> String:
+        return self.describe()
+
+fn main():
+    let point = Point(0, read_line().to_int())
+    const description = point.to_string()
+    println(description)
+    println((4.1+5.0).to_string())
+    return point.describe()

@@ -16,9 +16,19 @@ pub struct ResolvedFunction {
 }
 
 #[derive(Debug, Clone)]
+pub struct ResolvedStruct {
+    pub name: String,
+    pub compiled_name: String,
+    pub fields: Vec<FieldDef>,
+    pub methods: Vec<(String, String)>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
 pub struct ResolvedProgram {
     pub var_resolutions: HashMap<Span, ResolvedVar>,
     pub functions: Vec<ResolvedFunction>,
+    pub structs: Vec<ResolvedStruct>,
     pub top_level_consts: HashMap<String, LitVal>,
     pub imported_modules: Vec<Module>,
 }
@@ -31,6 +41,7 @@ pub struct Resolver {
     pub top_level_consts: HashMap<String, LitVal>,
     pub loader: ModuleLoader,
     pub imported_modules: Vec<Module>,
+    resolving_method: bool,
 }
 
 impl Resolver {
@@ -47,6 +58,7 @@ impl Resolver {
             top_level_consts: HashMap::new(),
             loader,
             imported_modules: Vec::new(),
+            resolving_method: false,
         }
     }
 
@@ -64,7 +76,12 @@ impl Resolver {
                     )?;
                 }
                 Item::Decl(Decl::Struct(s)) => {
-                    self.scopes.register_global(s.name.clone(), s.span)?;
+                    let module_path = module.path.to_string_lossy().to_string();
+                    self.scopes.register_global_compiled(
+                        s.name.clone(),
+                        format!("{}.{}", module_path, s.name),
+                        s.span,
+                    )?;
                 }
                 Item::Decl(Decl::Enum(e)) => {
                     self.scopes.register_global(e.name.clone(), e.span)?;
@@ -89,15 +106,17 @@ impl Resolver {
             }
         }
 
+        self.validate_protocol_implementations(module)?;
+
         // ── Phase 2: Body Resolution ─────────────────────────────────────────
         for item in &module.items {
             match item {
                 Item::Decl(Decl::Fn(f)) => {
-                    self.resolve_fn_def(f, module.path.to_string_lossy().to_string())?;
+                    self.resolve_fn_def(f, module.path.to_string_lossy().to_string(), false)?;
                 }
                 Item::Decl(Decl::Impl(impl_def)) => {
                     for method in &impl_def.methods {
-                        self.resolve_fn_def(method, impl_compiled_parent(&module.path, impl_def))?;
+                        self.resolve_fn_def(method, impl_compiled_parent(&module.path, impl_def), true)?;
                     }
                 }
                 Item::Decl(_) => {}
@@ -123,9 +142,46 @@ impl Resolver {
             });
         }
 
+        let mut structs = Vec::new();
+        for struct_module in std::iter::once(module).chain(self.imported_modules.iter()) {
+            let module_path = struct_module.path.to_string_lossy();
+            for item in &struct_module.items {
+                let Item::Decl(Decl::Struct(def)) = item else {
+                    continue;
+                };
+                let compiled_name = format!("{}.{}", module_path, def.name);
+                let mut methods = Vec::new();
+                for impl_item in &struct_module.items {
+                    let Item::Decl(Decl::Impl(impl_def)) = impl_item else {
+                        continue;
+                    };
+                    if impl_def.target_type.get_compiled_name() != def.name {
+                        continue;
+                    }
+                    for method in &impl_def.methods {
+                        let compiled_method = self
+                            .completed_functions
+                            .iter()
+                            .find(|function| function.span == method.span)
+                            .map(|function| function.compiled_name.clone())
+                            .unwrap_or_else(|| format!("{}.{}.{}", module_path, def.name, method.name));
+                        methods.push((method.name.clone(), compiled_method));
+                    }
+                }
+                structs.push(ResolvedStruct {
+                    name: def.name.clone(),
+                    compiled_name,
+                    fields: def.fields.clone(),
+                    methods,
+                    span: def.span,
+                });
+            }
+        }
+
         Ok(ResolvedProgram {
             var_resolutions: std::mem::take(&mut self.var_resolutions),
             functions: std::mem::take(&mut self.completed_functions),
+            structs,
             top_level_consts: std::mem::take(&mut self.top_level_consts),
             imported_modules: std::mem::take(&mut self.imported_modules),
         })
@@ -165,7 +221,12 @@ impl Resolver {
                             }
                         }
                         Item::Decl(Decl::Struct(s)) => {
-                            let _ = self.scopes.register_global(s.name.clone(), s.span);
+                            let module_path = imported_module.path.to_string_lossy().to_string();
+                            let _ = self.scopes.register_global_compiled(
+                                s.name.clone(),
+                                format!("{}.{}", module_path, s.name),
+                                s.span,
+                            );
                         }
                         Item::Decl(Decl::Enum(e)) => {
                             let _ = self.scopes.register_global(e.name.clone(), e.span);
@@ -193,13 +254,14 @@ impl Resolver {
                 for item in &imported_module.items {
                     match item {
                         Item::Decl(Decl::Fn(f)) => {
-                            self.resolve_fn_def(f, imported_module.path.to_string_lossy().to_string())?;
+                            self.resolve_fn_def(f, imported_module.path.to_string_lossy().to_string(), false)?;
                         }
                         Item::Decl(Decl::Impl(impl_def)) => {
                             for method in &impl_def.methods {
                                 self.resolve_fn_def(
                                     method,
                                     impl_compiled_parent(&imported_module.path, impl_def),
+                                    true,
                                 )?;
                             }
                         }
@@ -213,7 +275,7 @@ impl Resolver {
         Ok(())
     }
 
-    fn resolve_fn_def(&mut self, f: &FnDef, parent: String) -> Result<(), SemaError> {
+    fn resolve_fn_def(&mut self, f: &FnDef, parent: String, is_method: bool) -> Result<(), SemaError> {
         let compiled_name = self.compiled_function_name(&parent, &f.name);
         self.scopes.enter_function(f.name.clone(), compiled_name.clone());
 
@@ -221,7 +283,11 @@ impl Resolver {
             self.scopes.current_fn_mut().define_local(param.name.clone(), VarKind::Constant, param.span)?;
         }
 
-        self.resolve_block(&f.body)?;
+        let was_resolving_method = self.resolving_method;
+        self.resolving_method = is_method;
+        let body_result = self.resolve_block(&f.body);
+        self.resolving_method = was_resolving_method;
+        body_result?;
 
         let fn_scope = self.scopes.exit_function();
         self.completed_functions.push(ResolvedFunction {
@@ -242,6 +308,176 @@ impl Resolver {
             format!("{}.{}", parent, name)
         }
     }
+
+    fn validate_protocol_implementations(&self, module: &Module) -> Result<(), SemaError> {
+            let modules = std::iter::once(module).chain(self.imported_modules.iter());
+            for impl_module in std::iter::once(module).chain(self.imported_modules.iter()) {
+                for item in &impl_module.items {
+                    let Item::Decl(Decl::Impl(impl_def)) = item else {
+                        continue;
+                    };
+                    let Some(protocol_type) = &impl_def.for_protocol else {
+                        continue;
+                    };
+                    let protocol_name = protocol_type.get_compiled_name();
+                    let protocol = modules
+                        .clone()
+                        .flat_map(|m| m.items.iter())
+                        .find_map(|item| match item {
+                            Item::Decl(Decl::Protocol(protocol)) if protocol.name == protocol_name => {
+                                Some(protocol)
+                            }
+                            _ => None,
+                        });
+
+                    let (required_properties, required_methods) = if let Some(protocol) = protocol {
+                        (
+                            protocol
+                                .properties
+                                .iter()
+                                .map(|property| (property.name.as_str(), property.type_ann.get_compiled_name()))
+                                .collect::<Vec<_>>(),
+                            protocol.methods.iter().collect::<Vec<_>>(),
+                        )
+                    } else {
+                        match protocol_name.as_str() {
+                            "ToString" => (Vec::new(), Vec::new()),
+                            "Format" => (Vec::new(), Vec::new()),
+                            _ => {
+                                return Err(SemaError::custom(
+                                    format!("Unknown protocol '{}'", protocol_name),
+                                    impl_def.span,
+                                ));
+                            }
+                        }
+                    };
+
+                    let target_name = impl_def.target_type.get_compiled_name();
+                    let target_struct = std::iter::once(module)
+                        .chain(self.imported_modules.iter())
+                        .flat_map(|m| m.items.iter())
+                        .find_map(|item| match item {
+                            Item::Decl(Decl::Struct(def)) if def.name == target_name => Some(def),
+                            _ => None,
+                        });
+
+                    for (property_name, expected_type) in required_properties {
+                        let actual_type = if let Some(target_struct) = target_struct {
+                            target_struct
+                                .fields
+                                .iter()
+                                .find(|field| field.name == property_name)
+                                .map(|field| field.type_ann.get_compiled_name())
+                        } else {
+                            builtin_property_type(&target_name, property_name)
+                                .map(str::to_string)
+                        };
+                        match actual_type {
+                            Some(actual_type) if actual_type == expected_type => {}
+                            Some(actual_type) => {
+                                return Err(SemaError::custom(
+                                    format!(
+                                        "Type '{}' does not satisfy protocol '{}': property '{}' has type '{}', expected '{}'",
+                                        target_name, protocol_name, property_name, actual_type, expected_type
+                                    ),
+                                    impl_def.span,
+                                ));
+                            }
+                            None => {
+                                return Err(SemaError::custom(
+                                    format!(
+                                        "Type '{}' does not satisfy protocol '{}': missing property '{}'",
+                                        target_name, protocol_name, property_name
+                                    ),
+                                    impl_def.span,
+                                ));
+                            }
+                        }
+                    }
+
+                    for required_method in required_methods {
+                        let Some(method) = impl_def
+                            .methods
+                            .iter()
+                            .find(|method| method.name == required_method.name)
+                        else {
+                            return Err(SemaError::custom(
+                                format!(
+                                    "Type '{}' does not satisfy protocol '{}': missing method '{}'",
+                                    target_name, protocol_name, required_method.name
+                                ),
+                                impl_def.span,
+                            ));
+                        };
+                        if !method_signatures_match(required_method, method) {
+                            return Err(SemaError::custom(
+                                format!(
+                                    "Type '{}' does not satisfy protocol '{}': method '{}' has an incompatible signature",
+                                    target_name, protocol_name, required_method.name
+                                ),
+                                method.span,
+                            ));
+                        }
+                    }
+
+                    if protocol_name == "ToString" {
+                        let Some(method) = impl_def.methods.iter().find(|method| method.name == "to_string") else {
+                            return Err(SemaError::custom(
+                                format!(
+                                    "Type '{}' does not satisfy protocol 'ToString': missing method 'to_string'",
+                                    target_name
+                                ),
+                                impl_def.span,
+                            ));
+                        };
+                        if method.params.iter().filter(|param| param.name == "self").count() > 1
+                            || method.params.iter().any(|param| param.name != "self")
+                            || method.ret_type.as_ref().map(TypeAnn::get_compiled_name).as_deref()
+                                != Some("String")
+                        {
+                            return Err(SemaError::custom(
+                                format!(
+                                    "Type '{}' does not satisfy protocol 'ToString': method 'to_string' must have signature fn() -> String",
+                                    target_name
+                                ),
+                                method.span,
+                            ));
+                        }
+                    }
+
+                    if protocol_name == "Format" {
+                        let Some(method) = impl_def.methods.iter().find(|method| method.name == "format") else {
+                            return Err(SemaError::custom(
+                                format!(
+                                    "Type '{}' does not satisfy protocol 'Format': missing method 'format'",
+                                    target_name
+                                ),
+                                impl_def.span,
+                            ));
+                        };
+                        let params = method
+                            .params
+                            .iter()
+                            .filter(|param| param.name != "self")
+                            .map(|param| param.type_ann.as_ref().map(TypeAnn::get_compiled_name))
+                            .collect::<Vec<_>>();
+                        if params != [Some("String".to_string())]
+                            || method.ret_type.as_ref().map(TypeAnn::get_compiled_name).as_deref()
+                                != Some("String")
+                        {
+                            return Err(SemaError::custom(
+                                format!(
+                                    "Type '{}' does not satisfy protocol 'Format': method 'format' must have signature fn(String) -> String",
+                                    target_name
+                                ),
+                                method.span,
+                            ));
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
 
     fn resolve_block(&mut self, block: &Block) -> Result<(), SemaError> {
         self.scopes.current_fn_mut().enter_block();
@@ -317,6 +553,9 @@ impl Resolver {
     fn check_and_resolve_assignment(&mut self, target: &Expr, assign_span: Span) -> Result<(), SemaError> {
         match target {
             Expr::Ident(name, span) => {
+                if name == "self" && self.resolving_method {
+                    return Err(SemaError::assign_constant(name, assign_span));
+                }
                 let resolved = self.scopes.resolve(name, *span)?;
                 match &resolved {
                     ResolvedVar::Local { kind, .. } => {
@@ -364,6 +603,10 @@ impl Resolver {
                 Ok(())
             }
             Expr::Ident(name, span) => {
+                if name == "self" && self.resolving_method {
+                    self.var_resolutions.insert(*span, ResolvedVar::This { span: *span });
+                    return Ok(());
+                }
                 let resolved = self.scopes.resolve(name, *span)?;
                 self.var_resolutions.insert(*span, resolved);
                 Ok(())
@@ -539,18 +782,59 @@ impl Resolver {
 
 fn impl_compiled_parent(path: &std::path::Path, impl_def: &ImplDef) -> String {
     let module_path = path.to_string_lossy();
+    let target_name = impl_def.target_type.get_compiled_name();
     match &impl_def.for_protocol {
+        Some(proto_name)
+            if proto_name.get_compiled_name() == "ToString"
+                && matches!(target_name.as_str(), "Int" | "Float" | "Bool" | "String") =>
+        {
+            format!("__ionvm.prelude.{}.#ToString", target_name)
+        }
         Some(proto_name) => format!(
             "{}.{}.#{}",
             module_path,
-            impl_def.target_type.get_compiled_name(),
+            target_name,
             proto_name.get_compiled_name()
         ),
         None => format!(
             "{}.{}",
             module_path,
-            impl_def.target_type.get_compiled_name()
+            target_name
         ),
+    }
+}
+
+fn method_signatures_match(required: &FnSig, actual: &FnDef) -> bool {
+        let required_params = required
+            .params
+            .iter()
+            .filter(|param| param.name != "self")
+            .map(|param| param.type_ann.as_ref().map(TypeAnn::get_compiled_name))
+            .collect::<Vec<_>>();
+        let actual_params = actual
+            .params
+            .iter()
+            .filter(|param| param.name != "self")
+            .map(|param| param.type_ann.as_ref().map(TypeAnn::get_compiled_name))
+            .collect::<Vec<_>>();
+        required_params == actual_params
+            && required
+                .ret_type
+                .as_ref()
+                .map(TypeAnn::get_compiled_name)
+                .unwrap_or_else(|| "Unit".to_string())
+                == actual
+                    .ret_type
+                    .as_ref()
+                    .map(TypeAnn::get_compiled_name)
+                    .unwrap_or_else(|| "Unit".to_string())
+}
+
+fn builtin_property_type(type_name: &str, property_name: &str) -> Option<&'static str> {
+        match (type_name, property_name) {
+            ("String" | "Array" | "IntArray" | "FloatArray", "length") => Some("Int"),
+            ("Float", "is_nan" | "is_infinite") => Some("Bool"),
+            _ => None,
     }
 }
 
@@ -576,6 +860,71 @@ mod tests {
         let module = parse(src).expect("parsed");
         let resolved = resolve(&module).expect("resolved");
         assert_eq!(resolved.functions.len(), 2);
+    }
+
+    #[test]
+    fn test_protocol_conformance_accepts_matching_properties_and_methods() {
+        let src = r#"
+        protocol Printable:
+            label: String
+            fn render(self, width: Int) -> String
+
+        struct Box:
+            label: String
+
+        impl Printable for Box:
+            fn render(width: Int) -> String:
+                return self.label
+        "#;
+        let module = parse(src).expect("parsed");
+        resolve(&module).expect("matching implementation conforms");
+    }
+
+    #[test]
+    fn test_protocol_conformance_rejects_missing_property() {
+        let src = r#"
+        protocol Sized:
+            length: Int
+
+        struct Box:
+            value: Int
+
+        impl Sized for Box: {}
+        "#;
+        let module = parse(src).expect("parsed");
+        let error = resolve(&module).expect_err("missing property must fail conformance");
+        assert!(error.to_string().contains("missing property 'length'"));
+    }
+
+    #[test]
+    fn test_protocol_conformance_rejects_method_signature_mismatch() {
+        let src = r#"
+        protocol Printable:
+            fn render(self, width: Int) -> String
+
+        struct Box:
+            label: String
+
+        impl Printable for Box:
+            fn render(width: Float) -> String:
+                return self.label
+        "#;
+        let module = parse(src).expect("parsed");
+        let error = resolve(&module).expect_err("mismatched method signature must fail");
+        assert!(error.to_string().contains("incompatible signature"));
+    }
+
+    #[test]
+    fn test_format_protocol_requires_the_format_method_contract() {
+        let src = r#"
+        struct Box:
+            value: Int
+
+        impl Format for Box: {}
+        "#;
+        let module = parse(src).expect("parsed");
+        let error = resolve(&module).expect_err("Format implementation must define format");
+        assert!(error.to_string().contains("missing method 'format'"));
     }
 
     #[test]

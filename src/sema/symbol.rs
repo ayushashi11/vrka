@@ -38,6 +38,9 @@ pub enum ResolvedVar {
         name: String,
         span: Span,
     },
+    This {
+        span: Span,
+    },
     /// Namespace / Module container (e.g. `std`, `math`, `std.io`)
     Namespace {
         path: Vec<String>,
@@ -62,6 +65,7 @@ impl ResolvedVar {
             ResolvedVar::Local { span, .. } => *span,
             ResolvedVar::Upvalue { span, .. } => *span,
             ResolvedVar::Global { span, .. } => *span,
+            ResolvedVar::This { span } => *span,
             ResolvedVar::Namespace { span, .. } => *span,
             ResolvedVar::QualifiedGlobal { span, .. } => *span,
             ResolvedVar::EnumVariant { span, .. } => *span,

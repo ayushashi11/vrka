@@ -107,6 +107,7 @@ fn main() -> anyhow::Result<()> {
             buffer
         }
     };
+    let source_code = format!("{source_code}\n{}", include_str!("../stdlib/prelude.mesh"));
 
     if source_code.trim().is_empty() {
         anyhow::bail!("Input source code is empty");

@@ -61,6 +61,16 @@ impl fmt::Display for SsaOp {
                 }
                 write!(f, ")")
             }
+            SsaOp::NewObject { prototype, fields, args, .. } => {
+                write!(f, "new_object @{}(", prototype)?;
+                for (i, ((field, _), arg)) in fields.iter().zip(args).enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}: {}", field, arg)?;
+                }
+                write!(f, ")")
+            }
             SsaOp::Spawn { callee, args } => {
                 write!(f, "spawn {}(", callee)?;
                 for (i, a) in args.iter().enumerate() {
@@ -73,6 +83,7 @@ impl fmt::Display for SsaOp {
             }
             SsaOp::Send { receiver, message } => write!(f, "send {}, {}", receiver, message),
             SsaOp::Receive => write!(f, "receive"),
+            SsaOp::This => write!(f, "this"),
             SsaOp::GlobalRef(name) => write!(f, "global @{}", name),
             SsaOp::QualifiedGlobal(path) => write!(f, "global @{}", path.join(".")),
             SsaOp::Atom(tag) => write!(f, ":{}", tag),

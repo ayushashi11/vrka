@@ -6,7 +6,7 @@ pub mod symbol;
 
 pub use error::SemaError;
 pub use loader::ModuleLoader;
-pub use resolve::{ResolvedFunction, ResolvedProgram, Resolver};
+pub use resolve::{ResolvedFunction, ResolvedProgram, ResolvedStruct, Resolver};
 pub use scope::{FunctionScope, LocalInfo, ScopeManager, UpvalueDesc};
 pub use symbol::{ResolvedVar, SymbolId, VarKind};
 

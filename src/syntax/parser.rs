@@ -350,12 +350,12 @@ impl<'a> Parser<'a> {
 
     pub fn parse_impl_def(&mut self) -> Result<ImplDef, ParseError> {
         let kw = self.expect(&TokenKind::Impl)?;
-        let target_type = self.parse_type_ann()?;
-        let for_protocol = if self.check(&TokenKind::Ident("for".to_string())) {
+        let first_type = self.parse_type_ann()?;
+        let (target_type, for_protocol) = if self.check(&TokenKind::For) {
             self.advance();
-            Some(self.parse_type_ann()?)
+            (self.parse_type_ann()?, Some(first_type))
         } else {
-            None
+            (first_type, None)
         };
 
         if self.check(&TokenKind::Colon) {
@@ -1363,6 +1363,27 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_protocol_impl() {
+        let src = r#"
+        impl ToString for Point: {
+            fn to_string() -> String: {
+                return "Point";
+            }
+        }
+        "#;
+        let module = parse(src).expect("parsed");
+        let Item::Decl(Decl::Impl(impl_def)) = &module.items[0] else {
+            panic!("expected impl");
+        };
+        assert_eq!(impl_def.target_type.get_compiled_name(), "Point");
+        assert_eq!(
+            impl_def.for_protocol.as_ref().map(TypeAnn::get_compiled_name),
+            Some("ToString".to_string())
+        );
+        assert_eq!(impl_def.methods[0].name, "to_string");
+    }
+
+    #[test]
     fn test_parse_match_with_array_decomposition() {
         let src = r#"
         fn classify(arr: Array[Int]) -> Int: {
@@ -1396,4 +1417,3 @@ mod tests {
         assert_eq!(module.items.len(), 2);
     }
 }
-

@@ -1,0 +1,230 @@
+# Mesh syntax grammar reference
+
+This is a human-readable reference for the syntax accepted by the current
+hand-written lexer and parser. It is not consumed by the compiler and is not
+yet a complete language specification. Semantic restrictions and runtime
+behavior may be narrower than the syntax shown here.
+
+## Notation
+
+The grammar uses EBNF:
+
+- `A ::= B` defines a production.
+- `|` means alternative.
+- `[ X ]` means optional.
+- `{ X }` means zero or more repetitions.
+- Terminals are written in double quotes.
+
+Newlines and semicolons both separate many declarations and statements.
+Commas may also separate entries in declaration lists and argument lists.
+Blocks can be written with explicit braces or with indentation. Before parsing,
+the layout pass rewrites indentation-based blocks into braces, so the parser
+itself receives brace-delimited blocks in either case.
+
+## Match expressions
+
+```ebnf
+match-expression ::= "match" expression explicit-match-block
+                   | "match" expression ":" newline indent match-arm+
+                     dedent
+explicit-match-block ::= [ ":" ] "{" { match-arm } "}"
+match-arm        ::= pattern "=>" expression [ "," | ";" ] { newline | ";" }
+```
+
+The subject follows `match`; each arm consists of a pattern, the `=>` token,
+and an expression to evaluate when the pattern matches. A match is itself an
+expression, so it can appear after `return`, in an initializer, or anywhere
+else an expression is accepted.
+
+For example, the layout form is:
+
+```mesh
+return match value:
+    0 => "zero"
+    1..=9 => "small"
+    _ => "other"
+```
+
+The increased indentation after the colon starts the match body; dedenting
+ends it. The layout pass converts that block to braces before parsing. The
+explicit-brace form is also valid:
+
+```mesh
+return match value: {
+    0 => "zero",
+    1..=9 => "small",
+    _ => "other",
+}
+```
+
+### Patterns
+
+```ebnf
+pattern          ::= "_"
+                   | literal-pattern
+                   | integer-range
+                   | identifier-pattern
+                   | atom-pattern
+                   | tuple-pattern
+                   | array-pattern
+
+literal-pattern  ::= integer | float | string | "true" | "false" | "unit" | "nil"
+integer-range    ::= integer ".." [ "=" ] [ expression ]
+identifier-pattern ::= identifier [ "(" [ pattern-list ] ")" ]
+atom-pattern     ::= atom [ "(" [ pattern-list ] ")" ]
+tuple-pattern    ::= "(" [ pattern-list ] ")"
+array-pattern    ::= "[" [ array-pattern-list ] "]"
+pattern-list     ::= pattern { "," pattern } [ "," ]
+array-pattern-list ::= array-pattern-part { ( "," | "|" ) array-pattern-part }
+array-pattern-part ::= pattern | ".." [ identifier | "_" ]
+```
+
+Pattern forms accepted by the parser:
+
+- `_` is the wildcard pattern.
+- A bare identifier such as `x` is a binding pattern.
+- An identifier followed by parentheses, such as `Some(x)`, is parsed as a
+  constructor/variant-shaped pattern.
+- An atom such as `:ready` is a tag pattern; `:some(value)` is its
+  payload-shaped form.
+- Tuples can contain nested patterns, for example `(x, _)`.
+- Array patterns contain element patterns and can include a rest segment,
+  for example `[head, ..tail]` or `[first | .._]`.
+- Integer ranges use `..` for an exclusive end or `..=` for an inclusive
+  end. Either end may be omitted by the parser.
+
+These productions describe parsing, not guaranteed matching semantics. In
+particular, a struct-shaped pattern such as `Point(x, y)` uses the declared
+field order to match and bind the corresponding object properties. The `Point`
+name is not yet checked against runtime type identity; nominal type markers
+are planned separately. Enum variant matching remains distinct from struct
+field destructuring.
+
+## Modules and declarations
+
+```ebnf
+module          ::= { module-item }
+module-item     ::= declaration | statement
+declaration     ::= function-definition
+                  | struct-definition
+                  | enum-definition
+                  | protocol-definition
+                  | impl-definition
+                  | import-declaration
+
+function-definition ::= "fn" identifier [ type-parameters ]
+                        "(" [ parameter-list ] ")"
+                        [ "->" type ] block
+
+struct-definition ::= "struct" identifier [ type-parameters ]
+                      ( [ ":" ] "{" { field-definition [ "," | ";" ] } "}"
+                      | ":" newline indent { field-definition newline } dedent )
+
+enum-definition ::= "enum" identifier [ type-parameters ]
+                    ( [ ":" ] "{" { enum-variant [ "," | ";" ] } "}"
+                    | newline indent { enum-variant newline } dedent )
+enum-variant    ::= identifier [ "(" [ type-list ] ")" ]
+
+protocol-definition ::= "protocol" identifier [ type-parameters ] [ ":" ]
+                        "{" { protocol-member [ "," | ";" ] } "}"
+protocol-member ::= field-definition
+                  | "fn" identifier [ type-parameters ]
+                    "(" [ parameter-list ] ")" [ "->" type ]
+
+impl-definition ::= "impl" type [ "for" type ] block
+
+import-declaration ::= "import" ( dotted-name | string )
+```
+
+For an implementation of a protocol, the first type is the protocol and the
+type after `for` is the implementing type. For example:
+
+```mesh
+impl ToString for Point: {
+    fn to_string() -> String: {
+        return "Point"
+    }
+}
+```
+
+## Types and parameters
+
+```ebnf
+type             ::= identifier [ "[" type-list "]" ]
+                   | "[" type "]"
+                   | "(" [ type-list ] ")"
+                   | "fn" "(" [ type-list ] ")" "->" type
+type-list        ::= type { "," type } [ "," ]
+type-parameters  ::= "[" identifier { "," identifier } [ "," ] "]"
+parameter-list   ::= parameter { "," parameter } [ "," ]
+parameter        ::= identifier [ ":" type ]
+field-definition ::= identifier ":" type
+```
+
+## Blocks and statements
+
+```ebnf
+block       ::= explicit-block | layout-block
+explicit-block ::= [ ":" ] "{" { statement } [ expression ] "}"
+layout-block ::= ":" newline indent { statement newline } [ expression ]
+                 dedent
+statement   ::= "let" identifier [ ":" type ] "=" expression
+              | "const" identifier [ ":" type ] "=" expression
+              | expression "=" expression
+              | expression augmented-assignment expression
+              | "while" expression [ ":" ] block
+              | "loop" [ ":" ] block
+              | "return" [ expression ]
+              | "break"
+              | "continue"
+              | expression
+
+augmented-assignment ::= "+=" | "-=" | "*=" | "/=" | "%="
+```
+
+The parser recognizes the last expression in a brace-delimited block as its
+tail expression when there is no following statement. Layout blocks are
+rewritten to equivalent explicit blocks before the parser sees them.
+
+## Expressions
+
+The parser handles binary operators by precedence, from lowest to highest:
+`or`, `and`, equality (`==`, `!=`), comparisons (`<`, `<=`, `>`, `>=`),
+addition/subtraction, then multiplication/division/remainder.
+
+```ebnf
+expression       ::= unary-expression
+                     { binary-operator unary-expression }
+unary-expression ::= [ "-" | "not" ] postfix-expression
+postfix-expression ::= primary-expression
+                       { call-suffix | field-suffix | index-suffix }
+call-suffix      ::= "(" [ expression-list ] ")"
+field-suffix     ::= "." identifier
+index-suffix     ::= "[" expression "]"
+
+primary-expression ::= literal
+                     | identifier
+                     | atom
+                     | "(" expression [ "," expression { "," expression } ] ")"
+                     | "[" [ expression-list ] "]"
+                     | block
+                     | if-expression
+                     | match-expression
+                     | lambda-expression
+                     | "spawn" primary-expression "(" [ expression-list ] ")"
+                     | "send" "(" expression "," expression ")"
+                     | "receive" "(" ")"
+
+if-expression   ::= "if" expression [ ":" ] block
+                    [ "else" [ ":" ] block ]
+lambda-expression ::= "fn" "(" [ parameter-list ] ")"
+                      [ "->" type ] [ ":" ] block
+expression-list ::= expression { "," expression } [ "," ]
+binary-operator ::= "or" | "and" | "==" | "!="
+                  | "<" | "<=" | ">" | ">="
+                  | "+" | "-" | "*" | "/" | "%"
+literal         ::= integer | float | string | "true" | "false" | "unit" | "nil"
+```
+
+The productions above intentionally abstract over lexer details such as
+comments, escapes, numeric underscores, and string interpolation.

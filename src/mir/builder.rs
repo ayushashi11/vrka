@@ -378,6 +378,9 @@ impl<'a> SsaBuilder<'a> {
                         ResolvedVar::Global { name, .. } => {
                             self.emit_inst(SsaOp::GlobalRef(name.clone()), Some(name.clone()), span)
                         }
+                        ResolvedVar::This { .. } => {
+                            self.emit_inst(SsaOp::This, Some(name.clone()), span)
+                        }
                         ResolvedVar::EnumVariant { variant_name, .. } => {
                             self.emit_inst(SsaOp::Atom(variant_name.clone()), Some(variant_name.clone()), span)
                         }
@@ -418,6 +421,30 @@ impl<'a> SsaBuilder<'a> {
                 self.emit_inst(SsaOp::Unary(*op, val), None, span)
             }
             Expr::Call { callee, args, .. } => {
+                if let Expr::Ident(_, callee_span) = callee.as_ref() {
+                    if let Some(ResolvedVar::Global { name, .. }) =
+                        self.resolved.var_resolutions.get(callee_span)
+                    {
+                        if let Some(struct_def) = self.resolved.structs.iter().find(|s| s.compiled_name == *name) {
+                            let arg_vals: Vec<ValueId> =
+                                args.iter().map(|arg| self.lower_expr(arg)).collect();
+                            return self.emit_inst(
+                                SsaOp::NewObject {
+                                    name: struct_def.name.clone(),
+                                    prototype: struct_def.compiled_name.clone(),
+                                    fields: struct_def
+                                        .fields
+                                        .iter()
+                                        .map(|field| (field.name.clone(), field.type_ann.clone()))
+                                        .collect(),
+                                    args: arg_vals,
+                                },
+                                None,
+                                span,
+                            );
+                        }
+                    }
+                }
                 let callee_val = self.lower_expr(callee);
                 let arg_vals: Vec<ValueId> = args.iter().map(|a| self.lower_expr(a)).collect();
                 self.emit_inst(SsaOp::Call { callee: callee_val, args: arg_vals }, None, span)
@@ -888,7 +915,10 @@ pub fn build_ssa_program(resolved: &ResolvedProgram, module: &Module) -> SsaProg
         functions.push(ssa_fn);
     }
 
-    SsaProgram { functions }
+    SsaProgram {
+        functions,
+        structs: resolved.structs.clone(),
+    }
 }
 
 fn find_compiled_function_name(
@@ -900,6 +930,18 @@ fn find_compiled_function_name(
     let module_path = module_path.to_string_lossy();
     let parent = if let Some(impl_def) = impl_def {
         match &impl_def.for_protocol {
+            Some(proto_name)
+                if proto_name.get_compiled_name() == "ToString"
+                    && matches!(
+                        impl_def.target_type.get_compiled_name().as_str(),
+                        "Int" | "Float" | "Bool" | "String"
+                    ) =>
+            {
+                format!(
+                    "__ionvm.prelude.{}.#ToString",
+                    impl_def.target_type.get_compiled_name()
+                )
+            }
             Some(proto_name) => format!(
                 "{}.{}.#{}",
                 module_path,
@@ -915,22 +957,21 @@ fn find_compiled_function_name(
     } else {
         module_path.to_string()
     };
-    let expected = if function.name == "main" && impl_def.is_none() {
-        "main".to_string()
-    } else {
-        format!("{}.{}", parent, function.name)
-    };
-
     resolved
         .functions
         .iter()
         .find(|resolved_function| {
             resolved_function.name == function.name
                 && resolved_function.span == function.span
-                && resolved_function.compiled_name == expected
         })
         .map(|resolved_function| resolved_function.compiled_name.clone())
-        .unwrap_or(expected)
+        .unwrap_or_else(|| {
+            if function.name == "main" && impl_def.is_none() {
+                "main".to_string()
+            } else {
+                format!("{}.{}", parent, function.name)
+            }
+        })
 }
 
 pub fn eval_unary_const(op: UnaryOp, lit: &LitVal) -> Option<LitVal> {

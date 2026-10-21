@@ -1,0 +1,21 @@
+protocol Format:
+    fn format(self, spec: String) -> String
+
+protocol ToString:
+    fn to_string(self) -> String
+
+impl ToString for Int:
+    fn to_string() -> String:
+        return self.format("")
+
+impl ToString for Float:
+    fn to_string() -> String:
+        return self.format("")
+
+impl ToString for Bool:
+    fn to_string() -> String:
+        return self.format("")
+
+impl ToString for String:
+    fn to_string() -> String:
+        return self

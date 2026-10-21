@@ -71,6 +71,12 @@ pub enum SsaOp {
     },
     ArrayLit(Vec<ValueId>),
     TupleLit(Vec<ValueId>),
+    NewObject {
+        name: String,
+        prototype: String,
+        fields: Vec<(String, TypeAnn)>,
+        args: Vec<ValueId>,
+    },
     Spawn {
         callee: ValueId,
         args: Vec<ValueId>,
@@ -80,6 +86,7 @@ pub enum SsaOp {
         message: ValueId,
     },
     Receive,
+    This,
     GlobalRef(String),
     QualifiedGlobal(Vec<String>),
     Atom(String),
@@ -213,4 +220,5 @@ impl SsaFunction {
 #[derive(Debug, Clone)]
 pub struct SsaProgram {
     pub functions: Vec<SsaFunction>,
+    pub structs: Vec<crate::sema::ResolvedStruct>,
 }

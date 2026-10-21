@@ -257,6 +257,7 @@ pub struct TypeInferrer {
     pub val_types: HashMap<ValueId, Type>,
     pub val_ops: HashMap<ValueId, SsaOp>,
     pub globals: HashMap<String, Type>,
+    struct_fields: HashMap<String, Vec<(String, Type)>>,
 }
 
 impl TypeInferrer {
@@ -266,12 +267,15 @@ impl TypeInferrer {
             val_types: HashMap::new(),
             val_ops: HashMap::new(),
             globals: HashMap::new(),
+            struct_fields: HashMap::new(),
         }
     }
 
     pub fn resolve_internal_attrs_based_off_type(&mut self, base_ty: &Type, field: &str) -> Option<Type> {
         match base_ty {
             Type::String => match field {
+                "format" => Some(Type::Fn { params: vec![Type::String], ret: Box::new(Type::String) }),
+                "to_string" => Some(Type::Fn { params: vec![], ret: Box::new(Type::String) }),
                 "trim" | "trim_start" | "trim_end" | "lstrip" | "rstrip" => {
                     Some(Type::Fn { params: vec![], ret: Box::new(Type::String) })
                 }
@@ -322,8 +326,10 @@ impl TypeInferrer {
                 "pop" => Some(Type::Fn { params: vec![], ret: Box::new(Type::Float) }),
                 _ => None,
             },
-            Type::Float => match field {
-                "is_nan" | "is_infinite" => Some(Type::Bool),
+            Type::Int | Type::Bool | Type::Float => match field {
+                "format" => Some(Type::Fn { params: vec![Type::String], ret: Box::new(Type::String) }),
+                "to_string" => Some(Type::Fn { params: vec![], ret: Box::new(Type::String) }),
+                "is_nan" | "is_infinite" if matches!(base_ty, Type::Float) => Some(Type::Bool),
                 _ => None,
             },
             _ => None,
@@ -336,10 +342,46 @@ impl TypeInferrer {
             if let Item::Decl(Decl::Struct(s)) = item {
                 let mut fields = HashMap::new();
                 let mut param_types = Vec::new();
+                let mut ordered_fields = Vec::new();
                 for f in &s.fields {
                     let ty = self.env.type_from_ann(&f.type_ann);
                     fields.insert(f.name.clone(), ty.clone());
                     param_types.push(ty);
+                    ordered_fields.push((f.name.clone(), self.env.type_from_ann(&f.type_ann)));
+                }
+                self.struct_fields.insert(s.name.clone(), ordered_fields);
+                for item in &module.items {
+                    let Item::Decl(Decl::Impl(impl_def)) = item else {
+                        continue;
+                    };
+                    if impl_def.target_type.get_compiled_name() != s.name {
+                        continue;
+                    }
+                    for method in &impl_def.methods {
+                        let params = method
+                            .params
+                            .iter()
+                            .map(|param| {
+                                param
+                                    .type_ann
+                                    .as_ref()
+                                    .map(|ann| self.env.type_from_ann(ann))
+                                    .unwrap_or_else(|| self.env.fresh_var())
+                            })
+                            .collect();
+                        let ret = method
+                            .ret_type
+                            .as_ref()
+                            .map(|ann| self.env.type_from_ann(ann))
+                            .unwrap_or_else(|| self.env.fresh_var());
+                        fields.insert(
+                            method.name.clone(),
+                            Type::Fn {
+                                params,
+                                ret: Box::new(ret),
+                            },
+                        );
+                    }
                 }
                 let struct_record = Type::Record {
                     fields,
@@ -368,6 +410,22 @@ impl TypeInferrer {
         for val in &func.values {
             let tv = self.env.fresh_var();
             self.val_types.insert(val.id, tv);
+        }
+
+        let implicit_receiver_type = match func.name.as_str() {
+            "__ionvm.prelude.Int.#ToString.to_string" => Some(Type::Int),
+            "__ionvm.prelude.Float.#ToString.to_string" => Some(Type::Float),
+            "__ionvm.prelude.Bool.#ToString.to_string" => Some(Type::Bool),
+            "__ionvm.prelude.String.#ToString.to_string" => Some(Type::String),
+            _ => None,
+        };
+        if let Some(receiver_type) = implicit_receiver_type {
+            for value in &func.values {
+                if value.name.as_deref() == Some("self") {
+                    self.env
+                        .unify(&self.val_types[&value.id], &receiver_type)?;
+                }
+            }
         }
 
         // 2. Bind parameter type annotations and connect with global function signature
@@ -590,6 +648,40 @@ impl TypeInferrer {
                     self.env.unify(&dst, &Type::Tuple(item_types))?;
                 }
             }
+            SsaOp::NewObject { name, fields, args, .. } => {
+                if fields.len() != args.len() {
+                    return Err(TypeError::ArityMismatch {
+                        name: "struct constructor".to_string(),
+                        expected: fields.len(),
+                        found: args.len(),
+                    });
+                }
+                let declared_record = self.globals.get(name).and_then(|ty| match ty {
+                    Type::Fn { ret, .. } => match ret.as_ref() {
+                        Type::Record { fields, .. } => Some(fields.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                });
+                let mut record_fields = declared_record.unwrap_or_default();
+                for ((field_name, field_ann), arg) in fields.iter().zip(args) {
+                    let expected = self.env.type_from_ann(field_ann);
+                    let actual = self.val_types[arg].clone();
+                    self.env.unify(&actual, &expected)?;
+                    if !record_fields.contains_key(field_name) {
+                        record_fields.insert(field_name.clone(), expected);
+                    }
+                }
+                if let Some(dst) = dst_ty {
+                    self.env.unify(
+                        &dst,
+                        &Type::Record {
+                            fields: record_fields,
+                            row: None,
+                        },
+                    )?;
+                }
+            }
             SsaOp::Index { base, index } => {
                 if let Some(dst) = dst_ty {
                     let idx_ty = self.val_types[index].clone();
@@ -645,6 +737,16 @@ impl TypeInferrer {
                     self.env.unify(&dst, &Type::String)?;
                 }
             }
+            SsaOp::FormatValue { val, spec } => {
+                if let Some(spec) = spec {
+                    let spec_ty = self.val_types[spec].clone();
+                    self.env.unify(&spec_ty, &Type::String)?;
+                }
+                if let Some(dst) = dst_ty {
+                    self.env.unify(&dst, &Type::String)?;
+                }
+                let _ = val;
+            }
             SsaOp::Spawn { callee, args } => {
                 let callee_ty = self.val_types[callee].clone();
                 let arg_types: Vec<Type> = args.iter().map(|a| self.val_types[a].clone()).collect();
@@ -666,6 +768,7 @@ impl TypeInferrer {
                 }
             }
             SsaOp::Receive => {}
+            SsaOp::This => {}
             SsaOp::Call { callee, args } => {
                 let builtin = if let Some(SsaOp::GlobalRef(name)) = self.val_ops.get(callee) {
                     crate::builtins::Builtins::get(name)
@@ -791,15 +894,31 @@ impl TypeInferrer {
                 }
             }
             PatternNode::EnumVariant { name, args, .. } => {
-                let raw_name = name.strip_prefix(':').unwrap_or(name);
-                let row = self.env.fresh_row();
-                let arg_types: Vec<Type> = (0..args.len()).map(|_| self.env.fresh_var()).collect();
-                let mut cases = HashMap::new();
-                cases.insert(raw_name.to_string(), arg_types.clone());
+                if let Some(fields) = self.struct_fields.get(name).cloned() {
+                    if args.len() != fields.len() {
+                        return Err(TypeError::ArityMismatch {
+                            name: name.clone(),
+                            expected: fields.len(),
+                            found: args.len(),
+                        });
+                    }
+                    let row = self.env.fresh_row();
+                    let field_types: HashMap<_, _> = fields.iter().cloned().collect();
+                    self.env.unify(target_ty, &Type::Record { fields: field_types, row: Some(row) })?;
+                    for (arg_pat, (_, field_ty)) in args.iter().zip(fields.iter()) {
+                        self.infer_pattern(arg_pat, field_ty, bindings)?;
+                    }
+                } else {
+                    let raw_name = name.strip_prefix(':').unwrap_or(name);
+                    let row = self.env.fresh_row();
+                    let arg_types: Vec<Type> = (0..args.len()).map(|_| self.env.fresh_var()).collect();
+                    let mut cases = HashMap::new();
+                    cases.insert(raw_name.to_string(), arg_types.clone());
 
-                self.env.unify(target_ty, &Type::Variant { cases, row: Some(row) })?;
-                for (arg_pat, t) in args.iter().zip(arg_types.iter()) {
-                    self.infer_pattern(arg_pat, t, bindings)?;
+                    self.env.unify(target_ty, &Type::Variant { cases, row: Some(row) })?;
+                    for (arg_pat, t) in args.iter().zip(arg_types.iter()) {
+                        self.infer_pattern(arg_pat, t, bindings)?;
+                    }
                 }
             }
             // ── IntRange and FloatRange Resolution in Patterns ────────────────
@@ -1074,4 +1193,3 @@ mod tests {
         }
     }
 }
-
