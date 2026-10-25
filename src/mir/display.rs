@@ -39,8 +39,12 @@ impl fmt::Display for SsaOp {
             }
             SsaOp::FieldAccess { base, field } => write!(f, "{}.{}", base, field),
             SsaOp::Index { base, index } => write!(f, "{}[{}]", base, index),
-            SsaOp::StoreField { base, field, val } => write!(f, "store {}.{} = {}", base, field, val),
-            SsaOp::StoreIndex { base, index, val } => write!(f, "store {}[{}] = {}", base, index, val),
+            SsaOp::StoreField { base, field, val } => {
+                write!(f, "store {}.{} = {}", base, field, val)
+            }
+            SsaOp::StoreIndex { base, index, val } => {
+                write!(f, "store {}[{}] = {}", base, index, val)
+            }
             SsaOp::ArrayLit(elems) => {
                 write!(f, "array [")?;
                 for (i, e) in elems.iter().enumerate() {
@@ -61,7 +65,22 @@ impl fmt::Display for SsaOp {
                 }
                 write!(f, ")")
             }
-            SsaOp::NewObject { prototype, fields, args, .. } => {
+            SsaOp::RecordLit(fields) => {
+                write!(f, "record (")?;
+                for (i, (k, e)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}: {}", k, e)?;
+                }
+                write!(f, ")")
+            }
+            SsaOp::NewObject {
+                prototype,
+                fields,
+                args,
+                ..
+            } => {
                 write!(f, "new_object @{}(", prototype)?;
                 for (i, ((field, _), arg)) in fields.iter().zip(args).enumerate() {
                     if i > 0 {
@@ -105,8 +124,27 @@ impl fmt::Display for SsaOp {
                 } else {
                     write!(f, "make_closure @{}", func)
                 }
-            },
-            SsaOp::FormatValue { val, spec } => write!(f, "format_value {}, {}", val, spec.map_or_else(|| String::from("<no spec>"), |v| format!("{}", v))),
+            }
+            SsaOp::MakeEnum {
+                enum_name,
+                variant_name,
+                args,
+            } => {
+                write!(f, "make_enum {}::{}(", enum_name, variant_name)?;
+                for (index, arg) in args.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", arg)?;
+                }
+                write!(f, ")")
+            }
+            SsaOp::FormatValue { val, spec } => write!(
+                f,
+                "format_value {}, {}",
+                val,
+                spec.map_or_else(|| String::from("<no spec>"), |v| format!("{}", v))
+            ),
         }
     }
 }
@@ -122,10 +160,20 @@ impl fmt::Display for SsaTerminator {
                 }
             }
             SsaTerminator::Goto(bb, _) => write!(f, "br {}", bb),
-            SsaTerminator::Branch { cond, then_bb, else_bb, .. } => {
+            SsaTerminator::Branch {
+                cond,
+                then_bb,
+                else_bb,
+                ..
+            } => {
                 write!(f, "br {}, {}, {}", cond, then_bb, else_bb)
             }
-            SsaTerminator::Match { target, arms, default_bb, .. } => {
+            SsaTerminator::Match {
+                target,
+                arms,
+                default_bb,
+                ..
+            } => {
                 writeln!(f, "match {} [", target)?;
                 for arm in arms {
                     writeln!(f, "    {:?} => {},", arm.pattern, arm.target_bb)?;

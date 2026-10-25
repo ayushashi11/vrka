@@ -10,7 +10,12 @@ pub struct Span {
 
 impl Span {
     pub fn new(start: usize, end: usize, line: usize, col: usize) -> Self {
-        Self { start, end, line, col }
+        Self {
+            start,
+            end,
+            line,
+            col,
+        }
     }
 
     pub fn merge(self, other: Span) -> Self {
@@ -18,7 +23,11 @@ impl Span {
             start: self.start.min(other.start),
             end: self.end.max(other.end),
             line: self.line.min(other.line),
-            col: if self.start <= other.start { self.col } else { other.col },
+            col: if self.start <= other.start {
+                self.col
+            } else {
+                other.col
+            },
         }
     }
 }
@@ -64,43 +73,43 @@ pub enum TokenKind {
     String(String),
 
     // Arithmetic & Assignment Operators
-    Plus,       // +
-    Minus,      // -
-    Star,       // *
-    Slash,      // /
-    Rem,        // %
-    PlusEq,     // +=
-    MinusEq,    // -=
-    StarEq,     // *=
-    SlashEq,    // /=
-    RemEq,      // %=
+    Plus,    // +
+    Minus,   // -
+    Star,    // *
+    Slash,   // /
+    Rem,     // %
+    PlusEq,  // +=
+    MinusEq, // -=
+    StarEq,  // *=
+    SlashEq, // /=
+    RemEq,   // %=
 
     // Comparison & Logic Operators
-    Eq,         // =
-    EqEq,       // ==
-    NotEq,      // !=
-    Lt,         // <
-    LtEq,       // <=
-    Gt,         // >
-    GtEq,       // >=
+    Eq,    // =
+    EqEq,  // ==
+    NotEq, // !=
+    Lt,    // <
+    LtEq,  // <=
+    Gt,    // >
+    GtEq,  // >=
 
     // Arrows & Ranges
-    Arrow,      // ->
-    FatArrow,   // =>
-    DotDot,     // ..
-    Dot,        // .
-    Pipe,       // |
+    Arrow,    // ->
+    FatArrow, // =>
+    DotDot,   // ..
+    Dot,      // .
+    Pipe,     // |
 
     // Delimiters
-    LParen,     // (
-    RParen,     // )
-    LBracket,   // [
-    RBracket,   // ]
-    LBrace,     // {
-    RBrace,     // }
-    Comma,      // ,
-    Semicolon,  // ;
-    Colon,      // :
+    LParen,    // (
+    RParen,    // )
+    LBracket,  // [
+    RBracket,  // ]
+    LBrace,    // {
+    RBrace,    // }
+    Comma,     // ,
+    Semicolon, // ;
+    Colon,     // :
 
     // Layout / Trivia
     Newline,

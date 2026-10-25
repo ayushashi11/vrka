@@ -1,3 +1,4 @@
+use crate::sema::resolve::ResolvedEnum;
 use crate::syntax::cst::{BinOp, LitVal, PatternNode, TypeAnn, UnaryOp};
 use crate::syntax::token::Span;
 use std::collections::HashMap;
@@ -71,6 +72,7 @@ pub enum SsaOp {
     },
     ArrayLit(Vec<ValueId>),
     TupleLit(Vec<ValueId>),
+    RecordLit(Vec<(String, ValueId)>),
     NewObject {
         name: String,
         prototype: String,
@@ -99,6 +101,11 @@ pub enum SsaOp {
     MakeClosure {
         func: String,
         env: Option<ValueId>,
+    },
+    MakeEnum {
+        enum_name: String,
+        variant_name: String,
+        args: Vec<ValueId>,
     },
     FormatValue {
         val: ValueId,
@@ -221,4 +228,5 @@ impl SsaFunction {
 pub struct SsaProgram {
     pub functions: Vec<SsaFunction>,
     pub structs: Vec<crate::sema::ResolvedStruct>,
+    pub enums: Vec<ResolvedEnum>,
 }

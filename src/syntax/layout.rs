@@ -126,61 +126,97 @@ fn lex_line(line: &str) -> Vec<LayoutTok> {
         // Single punctuation
         match b {
             b':' => {
-                toks.push(LayoutTok { kind: LayoutTokKind::Colon, text: ":".to_string() });
+                toks.push(LayoutTok {
+                    kind: LayoutTokKind::Colon,
+                    text: ":".to_string(),
+                });
                 i += 1;
                 continue;
             }
             b',' => {
-                toks.push(LayoutTok { kind: LayoutTokKind::Comma, text: ",".to_string() });
+                toks.push(LayoutTok {
+                    kind: LayoutTokKind::Comma,
+                    text: ",".to_string(),
+                });
                 i += 1;
                 continue;
             }
             b';' => {
-                toks.push(LayoutTok { kind: LayoutTokKind::Semicolon, text: ";".to_string() });
+                toks.push(LayoutTok {
+                    kind: LayoutTokKind::Semicolon,
+                    text: ";".to_string(),
+                });
                 i += 1;
                 continue;
             }
             b'(' => {
-                toks.push(LayoutTok { kind: LayoutTokKind::LParen, text: "(".to_string() });
+                toks.push(LayoutTok {
+                    kind: LayoutTokKind::LParen,
+                    text: "(".to_string(),
+                });
                 i += 1;
                 continue;
             }
             b')' => {
-                toks.push(LayoutTok { kind: LayoutTokKind::RParen, text: ")".to_string() });
+                toks.push(LayoutTok {
+                    kind: LayoutTokKind::RParen,
+                    text: ")".to_string(),
+                });
                 i += 1;
                 continue;
             }
             b'[' => {
-                toks.push(LayoutTok { kind: LayoutTokKind::LBracket, text: "[".to_string() });
+                toks.push(LayoutTok {
+                    kind: LayoutTokKind::LBracket,
+                    text: "[".to_string(),
+                });
                 i += 1;
                 continue;
             }
             b']' => {
-                toks.push(LayoutTok { kind: LayoutTokKind::RBracket, text: "]".to_string() });
+                toks.push(LayoutTok {
+                    kind: LayoutTokKind::RBracket,
+                    text: "]".to_string(),
+                });
                 i += 1;
                 continue;
             }
             b'{' => {
-                toks.push(LayoutTok { kind: LayoutTokKind::LBrace, text: "{".to_string() });
+                toks.push(LayoutTok {
+                    kind: LayoutTokKind::LBrace,
+                    text: "{".to_string(),
+                });
                 i += 1;
                 continue;
             }
             b'}' => {
-                toks.push(LayoutTok { kind: LayoutTokKind::RBrace, text: "}".to_string() });
+                toks.push(LayoutTok {
+                    kind: LayoutTokKind::RBrace,
+                    text: "}".to_string(),
+                });
                 i += 1;
                 continue;
             }
             b'.' => {
                 if i + 1 < n && bytes[i + 1] == b'.' {
                     if i + 2 < n && bytes[i + 2] == b'=' {
-                        toks.push(LayoutTok { kind: LayoutTokKind::Op, text: "..=".to_string() });
+                        toks.push(LayoutTok {
+                            kind: LayoutTokKind::Op,
+                            text: "..=".to_string(),
+                        });
                         i += 3;
                     } else {
-                        toks.push(LayoutTok { kind: LayoutTokKind::Op, text: "..".to_string() });
+                        toks.push(LayoutTok {
+                            kind: LayoutTokKind::Op,
+                            text: "..".to_string(),
+                        });
                         i += 2;
                     }
                 } else {
-                    toks.push(LayoutTok { kind: LayoutTokKind::Dot, text: ".".to_string() });
+                    toks.push(LayoutTok {
+                        kind: LayoutTokKind::Dot,
+                        text: ".".to_string(),
+                    });
                     i += 1;
                 }
                 continue;
@@ -319,7 +355,10 @@ pub fn layout(src: &str) -> String {
                 let p = pending[i];
                 if leading > p.colon_indent && bracket_depth == p.bd {
                     indent_stack.push(leading);
-                    open_blocks.push(OpenBlock { indent: leading, bd: p.bd });
+                    open_blocks.push(OpenBlock {
+                        indent: leading,
+                        bd: p.bd,
+                    });
                     out.push("{".to_string());
                     pending.remove(i);
                     opened = true;
@@ -328,7 +367,13 @@ pub fn layout(src: &str) -> String {
                 }
             }
             if !opened && bracket_depth == 0 {
-                dedent(leading, &mut indent_stack, &mut open_blocks, &mut out, Some(&mut pending));
+                dedent(
+                    leading,
+                    &mut indent_stack,
+                    &mut open_blocks,
+                    &mut out,
+                    Some(&mut pending),
+                );
             }
         } else if bracket_depth == 0 {
             dedent(leading, &mut indent_stack, &mut open_blocks, &mut out, None);
@@ -420,8 +465,17 @@ pub fn layout(src: &str) -> String {
 
                     // Check if colon is inside parens (like (x: Int, y: Float)) -> parameter type annotation!
                     let is_param_type_ann = paren_nesting > 0 && tok.kind == LayoutTokKind::Colon;
+                    let is_local_type_ann = tok.kind == LayoutTokKind::Colon
+                        && tok_idx == 2
+                        && matches!(
+                            line_toks.first().map(|t| t.text.as_str()),
+                            Some("let" | "const")
+                        )
+                        && line_toks
+                            .get(1)
+                            .is_some_and(|t| t.kind == LayoutTokKind::Name);
 
-                    if is_param_type_ann {
+                    if is_param_type_ann || is_local_type_ann {
                         out.push(tok.text.clone());
                     } else if !remaining.is_empty() {
                         if remaining[0].kind == LayoutTokKind::LBrace {
@@ -430,9 +484,17 @@ pub fn layout(src: &str) -> String {
                         } else if tok.kind == LayoutTokKind::Colon
                             && tok_idx > 0
                             && (line_toks[tok_idx - 1].kind == LayoutTokKind::Name)
-                            && (remaining.len() == 1 || (remaining.len() > 1 && remaining[1].kind != LayoutTokKind::Colon))
-                            && (line_toks[0].text != "if" && line_toks[0].text != "else" && line_toks[0].text != "while" && line_toks[0].text != "fn" && line_toks[0].text != "for")
-                            && remaining.iter().all(|t| t.kind != LayoutTokKind::Op && t.text != "=" && t.text != "return")
+                            && (remaining.len() == 1
+                                || (remaining.len() > 1
+                                    && remaining[1].kind != LayoutTokKind::Colon))
+                            && (line_toks[0].text != "if"
+                                && line_toks[0].text != "else"
+                                && line_toks[0].text != "while"
+                                && line_toks[0].text != "fn"
+                                && line_toks[0].text != "for")
+                            && remaining.iter().all(|t| {
+                                t.kind != LayoutTokKind::Op && t.text != "=" && t.text != "return"
+                            })
                         {
                             // Field declaration in struct (e.g. `x: Int`): not a block!
                             out.push(tok.text.clone());
@@ -445,7 +507,9 @@ pub fn layout(src: &str) -> String {
 
                             for rt in remaining {
                                 match rt.kind {
-                                    LayoutTokKind::LParen | LayoutTokKind::LBracket | LayoutTokKind::LBrace => {
+                                    LayoutTokKind::LParen
+                                    | LayoutTokKind::LBracket
+                                    | LayoutTokKind::LBrace => {
                                         scan_bd += 1;
                                         if suffix_toks.is_empty() {
                                             body_toks.push(rt.clone());
@@ -453,7 +517,9 @@ pub fn layout(src: &str) -> String {
                                             suffix_toks.push(rt.clone());
                                         }
                                     }
-                                    LayoutTokKind::RParen | LayoutTokKind::RBracket | LayoutTokKind::RBrace => {
+                                    LayoutTokKind::RParen
+                                    | LayoutTokKind::RBracket
+                                    | LayoutTokKind::RBrace => {
                                         scan_bd = scan_bd.saturating_sub(1);
                                         if scan_bd < inner_bd {
                                             suffix_toks.push(rt.clone());
@@ -488,11 +554,15 @@ pub fn layout(src: &str) -> String {
 
                             for st in suffix_toks {
                                 match st.kind {
-                                    LayoutTokKind::LParen | LayoutTokKind::LBracket | LayoutTokKind::LBrace => {
+                                    LayoutTokKind::LParen
+                                    | LayoutTokKind::LBracket
+                                    | LayoutTokKind::LBrace => {
                                         bracket_depth += 1;
                                         out.push(st.text);
                                     }
-                                    LayoutTokKind::RParen | LayoutTokKind::RBracket | LayoutTokKind::RBrace => {
+                                    LayoutTokKind::RParen
+                                    | LayoutTokKind::RBracket
+                                    | LayoutTokKind::RBrace => {
                                         while let Some(top) = open_blocks.last() {
                                             if top.bd >= bracket_depth {
                                                 if indent_stack.len() > 1 {
@@ -537,7 +607,10 @@ pub fn layout(src: &str) -> String {
                         }
                     } else {
                         // Colon at end of line -> introduces indented block!
-                        pending.push(Pending { bd: bracket_depth, colon_indent: leading });
+                        pending.push(Pending {
+                            bd: bracket_depth,
+                            colon_indent: leading,
+                        });
                         out.push(tok.text.clone());
                     }
                 }
@@ -588,6 +661,14 @@ fn main():
         assert!(laid_out.contains("fn main ( ) : {"));
         assert!(laid_out.contains("const a = 42 ;"));
         assert!(laid_out.contains("} ;"));
+    }
+
+    #[test]
+    fn test_layout_preserves_local_type_annotation() {
+        let src = "const nguess: Float = 1.0";
+        let laid_out = layout(src);
+        assert!(laid_out.contains("const nguess : Float = 1.0"));
+        assert!(!laid_out.contains("Float {"));
     }
 
     #[test]

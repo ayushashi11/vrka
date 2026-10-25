@@ -1,7 +1,25 @@
 use super::ty::*;
 use crate::mir::ssa::*;
-use crate::syntax::cst::{BinOp, LitVal, PatternNode, PatternSegment, TypeAnn, UnaryOp};
+use crate::syntax::StructPatternNode;
+use crate::syntax::cst::{BinOp, EnumDef, LitVal, PatternNode, PatternSegment, TypeAnn, UnaryOp};
 use std::collections::HashMap;
+
+fn option_type(inner: Type) -> Type {
+    Type::Variant {
+        cases: HashMap::from([
+            ("some".to_string(), vec![inner]),
+            ("none".to_string(), Vec::new()),
+        ]),
+        row: None,
+    }
+}
+
+fn result_type(ok: Type, err: Type) -> Type {
+    Type::Variant {
+        cases: HashMap::from([("ok".to_string(), vec![ok]), ("err".to_string(), vec![err])]),
+        row: None,
+    }
+}
 use thiserror::Error;
 
 #[derive(Debug, Error, Clone, PartialEq)]
@@ -39,6 +57,8 @@ pub struct TypeEnv {
     pub subst: HashMap<TypeVarId, Type>,
     pub next_var: usize,
     pub next_row: usize,
+    pub enum_defs: HashMap<String, EnumDef>,
+    pub struct_types: HashMap<String, Type>,
 }
 
 impl TypeEnv {
@@ -47,6 +67,8 @@ impl TypeEnv {
             subst: HashMap::new(),
             next_var: 0,
             next_row: 0,
+            enum_defs: HashMap::new(),
+            struct_types: HashMap::new(),
         }
     }
 
@@ -90,7 +112,9 @@ impl TypeEnv {
             Type::Variant { cases, row } => {
                 let resolved_cases = cases
                     .iter()
-                    .map(|(tag, args)| (tag.clone(), args.iter().map(|a| self.resolve(a)).collect()))
+                    .map(|(tag, args)| {
+                        (tag.clone(), args.iter().map(|a| self.resolve(a)).collect())
+                    })
                     .collect();
                 Type::Variant {
                     cases: resolved_cases,
@@ -133,7 +157,16 @@ impl TypeEnv {
             }
 
             // Row Polymorphism for Records (Duck typing on fields)
-            (Type::Record { fields: f1, row: r1 }, Type::Record { fields: f2, row: r2 }) => {
+            (
+                Type::Record {
+                    fields: f1,
+                    row: r1,
+                },
+                Type::Record {
+                    fields: f2,
+                    row: r2,
+                },
+            ) => {
                 // Unify common fields
                 for (k, v1) in f1 {
                     if let Some(v2) = f2.get(k) {
@@ -183,9 +216,16 @@ impl TypeEnv {
                 Ok(())
             }
 
-            (Type::Fn { params: p1, ret: r1 }, Type::Fn { params: p2, ret: r2 })
-                if p1.len() == p2.len() =>
-            {
+            (
+                Type::Fn {
+                    params: p1,
+                    ret: r1,
+                },
+                Type::Fn {
+                    params: p2,
+                    ret: r2,
+                },
+            ) if p1.len() == p2.len() => {
                 for (a, b) in p1.iter().zip(p2.iter()) {
                     self.unify(a, b)?;
                 }
@@ -219,34 +259,87 @@ impl TypeEnv {
     }
 
     pub fn type_from_ann(&self, ann: &TypeAnn) -> Type {
+        self.type_from_ann_with_generics(ann, &HashMap::new())
+    }
+
+    fn type_from_ann_with_generics(&self, ann: &TypeAnn, generics: &HashMap<String, Type>) -> Type {
         match ann {
-            TypeAnn::Named { name, args, .. } => match name.as_str() {
-                "Int" => Type::Int,
-                "Float" => Type::Float,
-                "Bool" => Type::Bool,
-                "String" => Type::String,
-                "Unit" => Type::Unit,
-                "Nil" => Type::Nil,
-                "IntArray" => Type::IntArray,
-                "FloatArray" => Type::FloatArray,
-                "Array" | "List" => {
-                    if let Some(inner) = args.first() {
-                        Type::Array(Box::new(self.type_from_ann(inner)))
-                    } else {
-                        Type::Array(Box::new(Type::Int))
+            TypeAnn::Named { name, args, .. } => {
+                if let Some(ty) = generics.get(name) {
+                    return ty.clone();
+                }
+                match name.as_str() {
+                    "Int" => Type::Int,
+                    "Float" => Type::Float,
+                    "Bool" => Type::Bool,
+                    "String" => Type::String,
+                    "Unit" => Type::Unit,
+                    "Nil" => Type::Nil,
+                    "IntArray" => Type::IntArray,
+                    "FloatArray" => Type::FloatArray,
+                    "Array" | "List" => {
+                        if let Some(inner) = args.first() {
+                            Type::Array(Box::new(self.type_from_ann_with_generics(inner, generics)))
+                        } else {
+                            Type::Array(Box::new(Type::Int))
+                        }
+                    }
+                    _ => {
+                        if let Some(enum_def) = self.enum_defs.get(name) {
+                            let enum_generics: HashMap<_, _> = enum_def
+                                .type_params
+                                .iter()
+                                .zip(args.iter())
+                                .map(|(param, arg)| {
+                                    (
+                                        param.clone(),
+                                        self.type_from_ann_with_generics(arg, generics),
+                                    )
+                                })
+                                .collect();
+                            let cases = enum_def
+                                .variants
+                                .iter()
+                                .map(|variant| {
+                                    (
+                                        variant.name.clone(),
+                                        variant
+                                            .payload
+                                            .iter()
+                                            .map(|payload| {
+                                                self.type_from_ann_with_generics(
+                                                    payload,
+                                                    &enum_generics,
+                                                )
+                                            })
+                                            .collect(),
+                                    )
+                                })
+                                .collect();
+                            Type::Variant { cases, row: None }
+                        } else if let Some(struct_type) = self.struct_types.get(name) {
+                            struct_type.clone()
+                        } else {
+                            Type::Record {
+                                fields: HashMap::new(),
+                                row: None,
+                            }
+                        }
                     }
                 }
-                _ => Type::Record {
-                    fields: HashMap::new(),
-                    row: None,
-                },
-            },
-            TypeAnn::Tuple(items, _) => {
-                Type::Tuple(items.iter().map(|i| self.type_from_ann(i)).collect())
             }
+            TypeAnn::Tuple(items, _) => Type::Tuple(
+                items
+                    .iter()
+                    .map(|i| self.type_from_ann_with_generics(i, generics))
+                    .collect(),
+            ),
             TypeAnn::Fn { params, ret, .. } => Type::Fn {
-                params: params.iter().map(|p| self.type_from_ann(p)).collect(),
-                ret: Box::new(self.type_from_ann(ret)),
+                params: params
+                    .iter()
+                    .map(|p| self.type_from_ann_with_generics(p, generics))
+                    .collect(),
+                ret: Box::new(self.type_from_ann_with_generics(ret, generics)),
             },
         }
     }
@@ -258,6 +351,15 @@ pub struct TypeInferrer {
     pub val_ops: HashMap<ValueId, SsaOp>,
     pub globals: HashMap<String, Type>,
     struct_fields: HashMap<String, Vec<(String, Type)>>,
+    enum_methods: HashMap<String, HashMap<String, EnumMethod>>,
+    enum_method_receivers: HashMap<String, Type>,
+    active_this_type: Option<Type>,
+}
+
+#[derive(Clone)]
+struct EnumMethod {
+    receiver: Type,
+    signature: Type,
 }
 
 impl TypeInferrer {
@@ -268,67 +370,193 @@ impl TypeInferrer {
             val_ops: HashMap::new(),
             globals: HashMap::new(),
             struct_fields: HashMap::new(),
+            enum_methods: HashMap::new(),
+            enum_method_receivers: HashMap::new(),
+            active_this_type: None,
         }
     }
 
-    pub fn resolve_internal_attrs_based_off_type(&mut self, base_ty: &Type, field: &str) -> Option<Type> {
+    fn freshen_type(&mut self, ty: &Type, substitutions: &mut HashMap<TypeVarId, Type>) -> Type {
+        match ty {
+            Type::Var(var) => substitutions
+                .entry(*var)
+                .or_insert_with(|| self.env.fresh_var())
+                .clone(),
+            Type::Array(inner) => Type::Array(Box::new(self.freshen_type(inner, substitutions))),
+            Type::Tuple(items) => Type::Tuple(
+                items
+                    .iter()
+                    .map(|item| self.freshen_type(item, substitutions))
+                    .collect(),
+            ),
+            Type::Fn { params, ret } => Type::Fn {
+                params: params
+                    .iter()
+                    .map(|param| self.freshen_type(param, substitutions))
+                    .collect(),
+                ret: Box::new(self.freshen_type(ret, substitutions)),
+            },
+            Type::Record { fields, row } => Type::Record {
+                fields: fields
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), self.freshen_type(ty, substitutions)))
+                    .collect(),
+                row: *row,
+            },
+            Type::Variant { cases, row } => Type::Variant {
+                cases: cases
+                    .iter()
+                    .map(|(name, payload)| {
+                        (
+                            name.clone(),
+                            payload
+                                .iter()
+                                .map(|ty| self.freshen_type(ty, substitutions))
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+                row: *row,
+            },
+            other => other.clone(),
+        }
+    }
+
+    fn enum_name_for_value(&self, value: ValueId, ty: &Type) -> Option<String> {
+        if let Some(SsaOp::MakeEnum { enum_name, .. }) = self.val_ops.get(&value) {
+            return Some(enum_name.clone());
+        }
+
+        let Type::Variant { cases, row: None } = ty else {
+            return None;
+        };
+
+        let mut matches = self.env.enum_defs.iter().filter_map(|(name, def)| {
+            (def.variants.len() == cases.len()
+                && def.variants.iter().all(|variant| {
+                    cases
+                        .get(&variant.name)
+                        .is_some_and(|payload| payload.len() == variant.payload.len())
+                }))
+            .then(|| name.clone())
+        });
+        let name = matches.next()?;
+        matches.next().is_none().then_some(name)
+    }
+
+    pub fn resolve_internal_attrs_based_off_type(
+        &mut self,
+        base_ty: &Type,
+        field: &str,
+    ) -> Option<Type> {
         match base_ty {
             Type::String => match field {
-                "format" => Some(Type::Fn { params: vec![Type::String], ret: Box::new(Type::String) }),
-                "to_string" => Some(Type::Fn { params: vec![], ret: Box::new(Type::String) }),
-                "trim" | "trim_start" | "trim_end" | "lstrip" | "rstrip" => {
-                    Some(Type::Fn { params: vec![], ret: Box::new(Type::String) })
-                }
-                "replace" => {
-                    Some(Type::Fn { params: vec![Type::String, Type::String], ret: Box::new(Type::String) })
-                }
-                "split" => {
-                    Some(Type::Fn { params: vec![Type::String], ret: Box::new(Type::Array(Box::new(Type::String))) })
-                }
-                "slice" => {
-                    Some(Type::Fn { params: vec![Type::Int, Type::Int], ret: Box::new(Type::String) })
-                }
+                "format" => Some(Type::Fn {
+                    params: vec![Type::String],
+                    ret: Box::new(Type::String),
+                }),
+                "to_string" => Some(Type::Fn {
+                    params: vec![],
+                    ret: Box::new(Type::String),
+                }),
+                "trim" | "trim_start" | "trim_end" | "lstrip" | "rstrip" => Some(Type::Fn {
+                    params: vec![],
+                    ret: Box::new(Type::String),
+                }),
+                "replace" => Some(Type::Fn {
+                    params: vec![Type::String, Type::String],
+                    ret: Box::new(Type::String),
+                }),
+                "split" => Some(Type::Fn {
+                    params: vec![Type::String],
+                    ret: Box::new(Type::Array(Box::new(Type::String))),
+                }),
+                "slice" => Some(Type::Fn {
+                    params: vec![Type::Int, Type::Int],
+                    ret: Box::new(Type::String),
+                }),
                 "starts_with" | "startswith" | "ends_with" | "endswith" | "contains" => {
-                    Some(Type::Fn { params: vec![Type::String], ret: Box::new(Type::Bool) })
+                    Some(Type::Fn {
+                        params: vec![Type::String],
+                        ret: Box::new(Type::Bool),
+                    })
                 }
-                "index_of" => {
-                    Some(Type::Fn { params: vec![Type::String], ret: Box::new(Type::Int) })
-                }
-                "repeat" => {
-                    Some(Type::Fn { params: vec![Type::Int], ret: Box::new(Type::String) })
-                }
-                "char_at" => {
-                    Some(Type::Fn { params: vec![Type::Int], ret: Box::new(Type::String) })
-                }
-                "to_int" => {
-                    Some(Type::Fn { params: vec![], ret: Box::new(Type::Int) })
-                }
-                "length" => {
-                    Some(Type::Int)
-                }
+                "index_of" => Some(Type::Fn {
+                    params: vec![Type::String],
+                    ret: Box::new(Type::Int),
+                }),
+                "repeat" => Some(Type::Fn {
+                    params: vec![Type::Int],
+                    ret: Box::new(Type::String),
+                }),
+                "char_at" => Some(Type::Fn {
+                    params: vec![Type::Int],
+                    ret: Box::new(Type::String),
+                }),
+                "to_int" => Some(Type::Fn {
+                    params: vec![],
+                    ret: Box::new(result_type(Type::Int, Type::String)),
+                }),
+                "length" => Some(Type::Int),
                 _ => None,
             },
             Type::Array(inner) => match field {
                 "length" => Some(Type::Int),
-                "push" => Some(Type::Fn { params: vec![*inner.clone()], ret: Box::new(Type::Unit) }),
-                "pop" => Some(Type::Fn { params: vec![], ret: inner.clone() }),
+                "push" => Some(Type::Fn {
+                    params: vec![*inner.clone()],
+                    ret: Box::new(Type::Unit),
+                }),
+                "pop" => Some(Type::Fn {
+                    params: vec![],
+                    ret: Box::new(option_type(*inner.clone())),
+                }),
+                "get" => Some(Type::Fn {
+                    params: vec![Type::Int],
+                    ret: Box::new(option_type(*inner.clone())),
+                }),
                 _ => None,
             },
             Type::IntArray => match field {
                 "length" => Some(Type::Int),
-                "push" => Some(Type::Fn { params: vec![Type::Int], ret: Box::new(Type::Unit) }),
-                "pop" => Some(Type::Fn { params: vec![], ret: Box::new(Type::Int) }),
+                "push" => Some(Type::Fn {
+                    params: vec![Type::Int],
+                    ret: Box::new(Type::Unit),
+                }),
+                "pop" => Some(Type::Fn {
+                    params: vec![],
+                    ret: Box::new(option_type(Type::Int)),
+                }),
+                "get" => Some(Type::Fn {
+                    params: vec![Type::Int],
+                    ret: Box::new(option_type(Type::Int)),
+                }),
                 _ => None,
             },
             Type::FloatArray => match field {
                 "length" => Some(Type::Int),
-                "push" => Some(Type::Fn { params: vec![Type::Float], ret: Box::new(Type::Unit) }),
-                "pop" => Some(Type::Fn { params: vec![], ret: Box::new(Type::Float) }),
+                "push" => Some(Type::Fn {
+                    params: vec![Type::Float],
+                    ret: Box::new(Type::Unit),
+                }),
+                "pop" => Some(Type::Fn {
+                    params: vec![],
+                    ret: Box::new(option_type(Type::Float)),
+                }),
+                "get" => Some(Type::Fn {
+                    params: vec![Type::Int],
+                    ret: Box::new(option_type(Type::Float)),
+                }),
                 _ => None,
             },
             Type::Int | Type::Bool | Type::Float => match field {
-                "format" => Some(Type::Fn { params: vec![Type::String], ret: Box::new(Type::String) }),
-                "to_string" => Some(Type::Fn { params: vec![], ret: Box::new(Type::String) }),
+                "format" => Some(Type::Fn {
+                    params: vec![Type::String],
+                    ret: Box::new(Type::String),
+                }),
+                "to_string" => Some(Type::Fn {
+                    params: vec![],
+                    ret: Box::new(Type::String),
+                }),
                 "is_nan" | "is_infinite" if matches!(base_ty, Type::Float) => Some(Type::Bool),
                 _ => None,
             },
@@ -339,6 +567,9 @@ impl TypeInferrer {
     pub fn register_module_declarations(&mut self, module: &crate::syntax::cst::Module) {
         use crate::syntax::cst::{Decl, Item};
         for item in &module.items {
+            if let Item::Decl(Decl::Enum(def)) = item {
+                self.env.enum_defs.insert(def.name.clone(), def.clone());
+            }
             if let Item::Decl(Decl::Struct(s)) = item {
                 let mut fields = HashMap::new();
                 let mut param_types = Vec::new();
@@ -387,6 +618,9 @@ impl TypeInferrer {
                     fields,
                     row: None, // closed record for concrete nominal struct
                 };
+                self.env
+                    .struct_types
+                    .insert(s.name.clone(), struct_record.clone());
                 let constructor_fn = Type::Fn {
                     params: param_types,
                     ret: Box::new(struct_record),
@@ -394,17 +628,120 @@ impl TypeInferrer {
                 self.globals.insert(s.name.clone(), constructor_fn);
             }
         }
+
+        for item in &module.items {
+            let Item::Decl(Decl::Impl(impl_def)) = item else {
+                continue;
+            };
+            let crate::syntax::cst::TypeAnn::Named {
+                name: enum_name,
+                args: target_args,
+                ..
+            } = &impl_def.target_type
+            else {
+                continue;
+            };
+            if !self.env.enum_defs.contains_key(enum_name.as_str()) {
+                continue;
+            }
+
+            let enum_def = self.env.enum_defs[enum_name].clone();
+            let mut generics: HashMap<String, Type> = enum_def
+                .type_params
+                .iter()
+                .map(|param| (param.clone(), self.env.fresh_var()))
+                .collect();
+            for (param, arg) in enum_def.type_params.iter().zip(target_args) {
+                if let crate::syntax::cst::TypeAnn::Named { name, args, .. } = arg {
+                    if args.is_empty() {
+                        if let Some(ty) = generics.get(param).cloned() {
+                            generics.insert(name.clone(), ty);
+                        }
+                    }
+                }
+            }
+            let receiver = self
+                .env
+                .type_from_ann_with_generics(&impl_def.target_type, &generics);
+            let parent = match &impl_def.for_protocol {
+                Some(protocol) => format!(
+                    "{}.{}.#{}",
+                    module.path.to_string_lossy(),
+                    impl_def.target_type.get_compiled_name(),
+                    protocol.get_compiled_name()
+                ),
+                None => format!(
+                    "{}.{}",
+                    module.path.to_string_lossy(),
+                    impl_def.target_type.get_compiled_name()
+                ),
+            };
+
+            for method in &impl_def.methods {
+                let mut method_generics = generics.clone();
+                for param in &method.type_params {
+                    method_generics.insert(param.clone(), self.env.fresh_var());
+                }
+                let params: Vec<Type> = method
+                    .params
+                    .iter()
+                    .filter(|param| param.name != "self")
+                    .map(|param| {
+                        param
+                            .type_ann
+                            .as_ref()
+                            .map(|ann| self.env.type_from_ann_with_generics(ann, &method_generics))
+                            .unwrap_or_else(|| self.env.fresh_var())
+                    })
+                    .collect();
+                let ret = method
+                    .ret_type
+                    .as_ref()
+                    .map(|ann| self.env.type_from_ann_with_generics(ann, &method_generics))
+                    .unwrap_or_else(|| self.env.fresh_var());
+                let signature = Type::Fn {
+                    params,
+                    ret: Box::new(ret),
+                };
+                let compiled_name = format!("{}.{}", parent, method.name);
+                self.enum_method_receivers
+                    .insert(compiled_name, receiver.clone());
+                self.enum_methods
+                    .entry(enum_name.clone())
+                    .or_default()
+                    .insert(
+                        method.name.clone(),
+                        EnumMethod {
+                            receiver: receiver.clone(),
+                            signature,
+                        },
+                    );
+            }
+        }
     }
 
-    pub fn register_program_declarations(&mut self, resolved: &crate::sema::ResolvedProgram, module: &crate::syntax::cst::Module) {
+    pub fn register_program_declarations(
+        &mut self,
+        resolved: &crate::sema::ResolvedProgram,
+        module: &crate::syntax::cst::Module,
+    ) {
         self.register_module_declarations(module);
         for imp in &resolved.imported_modules {
             self.register_module_declarations(imp);
         }
     }
 
-    pub fn infer_function(&mut self, func: &SsaFunction) -> Result<HashMap<ValueId, Type>, TypeError> {
+    pub fn infer_function(
+        &mut self,
+        func: &SsaFunction,
+    ) -> Result<HashMap<ValueId, Type>, TypeError> {
         self.val_types.clear();
+        self.val_ops.clear();
+        self.active_this_type = self
+            .enum_method_receivers
+            .get(&func.name)
+            .cloned()
+            .map(|receiver| self.freshen_type(&receiver, &mut HashMap::new()));
 
         // 1. Assign type variables to all SSA values
         for val in &func.values {
@@ -422,14 +759,17 @@ impl TypeInferrer {
         if let Some(receiver_type) = implicit_receiver_type {
             for value in &func.values {
                 if value.name.as_deref() == Some("self") {
-                    self.env
-                        .unify(&self.val_types[&value.id], &receiver_type)?;
+                    self.env.unify(&self.val_types[&value.id], &receiver_type)?;
                 }
             }
         }
 
         // 2. Bind parameter type annotations and connect with global function signature
-        if let Some(Type::Fn { params: sig_params, ret: sig_ret }) = self.globals.get(&func.name).cloned() {
+        if let Some(Type::Fn {
+            params: sig_params,
+            ret: sig_ret,
+        }) = self.globals.get(&func.name).cloned()
+        {
             for (i, (_, val_id, _)) in func.params.iter().enumerate() {
                 if let Some(sig_param_ty) = sig_params.get(i) {
                     let val_ty = self.val_types[val_id].clone();
@@ -589,7 +929,12 @@ impl TypeInferrer {
                             self.env.unify(&l_ty, &r_ty)?;
                             self.env.unify(&dst, &l_ty)?;
                         }
-                        BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => {
+                        BinOp::Eq
+                        | BinOp::NotEq
+                        | BinOp::Lt
+                        | BinOp::LtEq
+                        | BinOp::Gt
+                        | BinOp::GtEq => {
                             self.env.unify(&l_ty, &r_ty)?;
                             self.env.unify(&dst, &Type::Bool)?;
                         }
@@ -644,11 +989,30 @@ impl TypeInferrer {
             }
             SsaOp::TupleLit(items) => {
                 if let Some(dst) = dst_ty {
-                    let item_types: Vec<Type> = items.iter().map(|i| self.val_types[i].clone()).collect();
+                    let item_types: Vec<Type> =
+                        items.iter().map(|i| self.val_types[i].clone()).collect();
                     self.env.unify(&dst, &Type::Tuple(item_types))?;
                 }
             }
-            SsaOp::NewObject { name, fields, args, .. } => {
+            SsaOp::RecordLit(fields) => {
+                if let Some(dst) = dst_ty {
+                    let mut record_fields = HashMap::new();
+                    for (k, v) in fields {
+                        let v_ty = self.val_types[v].clone();
+                        record_fields.insert(k.clone(), v_ty);
+                    }
+                    self.env.unify(
+                        &dst,
+                        &Type::Record {
+                            fields: record_fields,
+                            row: None,
+                        },
+                    )?;
+                }
+            }
+            SsaOp::NewObject {
+                name, fields, args, ..
+            } => {
                 if fields.len() != args.len() {
                     return Err(TypeError::ArityMismatch {
                         name: "struct constructor".to_string(),
@@ -703,7 +1067,8 @@ impl TypeInferrer {
                         _ => {
                             // Duck typing: base is ArrayLike
                             let elem_ty = self.env.fresh_var();
-                            self.env.unify(&base_ty, &Type::Array(Box::new(elem_ty.clone())))?;
+                            self.env
+                                .unify(&base_ty, &Type::Array(Box::new(elem_ty.clone())))?;
                             self.env.unify(&dst, &elem_ty)?;
                         }
                     }
@@ -713,14 +1078,33 @@ impl TypeInferrer {
                 if let Some(dst) = dst_ty {
                     let base_ty = self.val_types[base].clone();
                     let resolved_base = self.env.resolve(&base_ty);
-                    if let Some(attr_ty) = self.resolve_internal_attrs_based_off_type(&resolved_base, field) {
+                    let enum_method = self
+                        .enum_name_for_value(*base, &resolved_base)
+                        .and_then(|name| self.enum_methods.get(&name))
+                        .and_then(|methods| methods.get(field))
+                        .cloned();
+                    if let Some(method) = enum_method {
+                        let mut substitutions = HashMap::new();
+                        let receiver = self.freshen_type(&method.receiver, &mut substitutions);
+                        let signature = self.freshen_type(&method.signature, &mut substitutions);
+                        self.env.unify(&base_ty, &receiver)?;
+                        self.env.unify(&dst, &signature)?;
+                    } else if let Some(attr_ty) =
+                        self.resolve_internal_attrs_based_off_type(&resolved_base, field)
+                    {
                         self.env.unify(&dst, &attr_ty)?;
                     } else {
                         let row = self.env.fresh_row();
                         let mut fields = HashMap::new();
                         fields.insert(field.clone(), dst);
                         // Duck typing: base has field
-                        self.env.unify(&base_ty, &Type::Record { fields, row: Some(row) })?;
+                        self.env.unify(
+                            &base_ty,
+                            &Type::Record {
+                                fields,
+                                row: Some(row),
+                            },
+                        )?;
                     }
                 }
             }
@@ -730,7 +1114,13 @@ impl TypeInferrer {
                 let row = self.env.fresh_row();
                 let mut fields = HashMap::new();
                 fields.insert(field.clone(), val_ty);
-                self.env.unify(&base_ty, &Type::Record { fields, row: Some(row) })?;
+                self.env.unify(
+                    &base_ty,
+                    &Type::Record {
+                        fields,
+                        row: Some(row),
+                    },
+                )?;
             }
             SsaOp::BuildString(_) => {
                 if let Some(dst) = dst_ty {
@@ -768,7 +1158,11 @@ impl TypeInferrer {
                 }
             }
             SsaOp::Receive => {}
-            SsaOp::This => {}
+            SsaOp::This => {
+                if let (Some(dst), Some(this_ty)) = (dst_ty, self.active_this_type.clone()) {
+                    self.env.unify(&dst, &this_ty)?;
+                }
+            }
             SsaOp::Call { callee, args } => {
                 let builtin = if let Some(SsaOp::GlobalRef(name)) = self.val_ops.get(callee) {
                     crate::builtins::Builtins::get(name)
@@ -791,16 +1185,13 @@ impl TypeInferrer {
                         }
                     }
                     if let Some(dst) = dst_ty {
-                        let ret_ty = if let Type::Var(_) = &builtin.ret_type {
-                            self.env.fresh_var()
-                        } else {
-                            builtin.ret_type.clone()
-                        };
+                        let ret_ty = self.freshen_type(&builtin.ret_type, &mut HashMap::new());
                         self.env.unify(&dst, &ret_ty)?;
                     }
                 } else if let Some(dst) = dst_ty {
                     let callee_ty = self.val_types[callee].clone();
-                    let arg_types: Vec<Type> = args.iter().map(|a| self.val_types[a].clone()).collect();
+                    let arg_types: Vec<Type> =
+                        args.iter().map(|a| self.val_types[a].clone()).collect();
                     let fn_ty = Type::Fn {
                         params: arg_types,
                         ret: Box::new(dst),
@@ -813,7 +1204,65 @@ impl TypeInferrer {
                     let row = self.env.fresh_row();
                     let mut cases = HashMap::new();
                     cases.insert(tag.clone(), vec![]);
-                    self.env.unify(&dst, &Type::Variant { cases, row: Some(row) })?;
+                    self.env.unify(
+                        &dst,
+                        &Type::Variant {
+                            cases,
+                            row: Some(row),
+                        },
+                    )?;
+                }
+            }
+            SsaOp::MakeEnum {
+                enum_name,
+                variant_name,
+                args,
+            } => {
+                let enum_def =
+                    self.env.enum_defs.get(enum_name).cloned().ok_or_else(|| {
+                        TypeError::Custom(format!("Unknown enum '{}'", enum_name))
+                    })?;
+                let variant = enum_def
+                    .variants
+                    .iter()
+                    .find(|variant| variant.name == *variant_name)
+                    .ok_or_else(|| {
+                        TypeError::Custom(format!(
+                            "Unknown variant '{}' in enum '{}'",
+                            variant_name, enum_name
+                        ))
+                    })?;
+                if args.len() != variant.payload.len() {
+                    return Err(TypeError::ArityMismatch {
+                        name: format!("{}::{}", enum_name, variant_name),
+                        expected: variant.payload.len(),
+                        found: args.len(),
+                    });
+                }
+                let generics: HashMap<_, _> = enum_def
+                    .type_params
+                    .iter()
+                    .map(|param| (param.clone(), self.env.fresh_var()))
+                    .collect();
+                let payload_types: Vec<_> = variant
+                    .payload
+                    .iter()
+                    .map(|payload| self.env.type_from_ann_with_generics(payload, &generics))
+                    .collect();
+                for (arg, expected) in args.iter().zip(&payload_types) {
+                    self.env.unify(&self.val_types[arg], expected)?;
+                }
+                if let Some(dst) = dst_ty {
+                    let mut cases = HashMap::new();
+                    cases.insert(variant_name.clone(), payload_types);
+                    let row = self.env.fresh_row();
+                    self.env.unify(
+                        &dst,
+                        &Type::Variant {
+                            cases,
+                            row: Some(row),
+                        },
+                    )?;
                 }
             }
             SsaOp::GlobalRef(name) => {
@@ -893,6 +1342,82 @@ impl TypeInferrer {
                     self.infer_pattern(p, t, bindings)?;
                 }
             }
+            PatternNode::Struct { name, fields, .. } => {
+                if let Some(name) = name {
+                    if let Some(struct_fields) = self.struct_fields.get(name).cloned() {
+                        let field_types: HashMap<_, _> = struct_fields.iter().cloned().collect();
+                        self.env.unify(
+                            target_ty,
+                            &Type::Record {
+                                fields: field_types.clone(),
+                                row: None,
+                            },
+                        )?;
+                        for field in fields {
+                            match field {
+                                StructPatternNode::KeyValue { key, value, .. } => {
+                                    if let Some((_, field_ty)) =
+                                        struct_fields.iter().find(|(n, _)| n == key)
+                                    {
+                                        self.infer_pattern(value, field_ty, bindings)?;
+                                    } else {
+                                        return Err(TypeError::Custom(format!(
+                                            "Field '{}' not found in struct '{}'",
+                                            key, name
+                                        )));
+                                    }
+                                }
+                                StructPatternNode::Shorthand { key, span } => {
+                                    if let Some((_, field_ty)) =
+                                        struct_fields.iter().find(|(n, _)| n == key)
+                                    {
+                                        self.infer_pattern(
+                                            &PatternNode::Bind(key.clone(), span.clone()),
+                                            field_ty,
+                                            bindings,
+                                        )?;
+                                    } else {
+                                        return Err(TypeError::Custom(format!(
+                                            "Field '{}' not found in struct '{}'",
+                                            key, name
+                                        )));
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        return Err(TypeError::Custom(format!("Unknown struct '{}'", name)));
+                    }
+                } else {
+                    let mut rec_fields = HashMap::new();
+                    for field in fields {
+                        match field {
+                            StructPatternNode::KeyValue { key, value, .. } => {
+                                let field_ty = self.env.fresh_var();
+                                self.infer_pattern(value, &field_ty, bindings)?;
+                                rec_fields.insert(key.clone(), field_ty);
+                            }
+                            StructPatternNode::Shorthand { key, span } => {
+                                let field_ty = self.env.fresh_var();
+                                self.infer_pattern(
+                                    &PatternNode::Bind(key.clone(), span.clone()),
+                                    &field_ty,
+                                    bindings,
+                                )?;
+                                rec_fields.insert(key.clone(), field_ty);
+                            }
+                        }
+                    }
+                    let row = self.env.fresh_row();
+                    self.env.unify(
+                        target_ty,
+                        &Type::Record {
+                            fields: rec_fields,
+                            row: Some(row),
+                        },
+                    )?;
+                }
+            }
             PatternNode::EnumVariant { name, args, .. } => {
                 if let Some(fields) = self.struct_fields.get(name).cloned() {
                     if args.len() != fields.len() {
@@ -904,28 +1429,52 @@ impl TypeInferrer {
                     }
                     let row = self.env.fresh_row();
                     let field_types: HashMap<_, _> = fields.iter().cloned().collect();
-                    self.env.unify(target_ty, &Type::Record { fields: field_types, row: Some(row) })?;
+                    self.env.unify(
+                        target_ty,
+                        &Type::Record {
+                            fields: field_types,
+                            row: Some(row),
+                        },
+                    )?;
                     for (arg_pat, (_, field_ty)) in args.iter().zip(fields.iter()) {
                         self.infer_pattern(arg_pat, field_ty, bindings)?;
                     }
                 } else {
                     let raw_name = name.strip_prefix(':').unwrap_or(name);
                     let row = self.env.fresh_row();
-                    let arg_types: Vec<Type> = (0..args.len()).map(|_| self.env.fresh_var()).collect();
+                    let arg_types: Vec<Type> =
+                        (0..args.len()).map(|_| self.env.fresh_var()).collect();
                     let mut cases = HashMap::new();
                     cases.insert(raw_name.to_string(), arg_types.clone());
 
-                    self.env.unify(target_ty, &Type::Variant { cases, row: Some(row) })?;
+                    self.env.unify(
+                        target_ty,
+                        &Type::Variant {
+                            cases,
+                            row: Some(row),
+                        },
+                    )?;
                     for (arg_pat, t) in args.iter().zip(arg_types.iter()) {
                         self.infer_pattern(arg_pat, t, bindings)?;
                     }
                 }
             }
             // ── IntRange and FloatRange Resolution in Patterns ────────────────
-            PatternNode::Range { start, end, inclusive: _, .. } => {
+            PatternNode::Range {
+                start,
+                end,
+                inclusive: _,
+                ..
+            } => {
                 let is_float = match (start, end) {
-                    (Some(s), _) => matches!(s.as_ref(), crate::syntax::cst::Expr::Literal(LitVal::Float(_), _)),
-                    (_, Some(e)) => matches!(e.as_ref(), crate::syntax::cst::Expr::Literal(LitVal::Float(_), _)),
+                    (Some(s), _) => matches!(
+                        s.as_ref(),
+                        crate::syntax::cst::Expr::Literal(LitVal::Float(_), _)
+                    ),
+                    (_, Some(e)) => matches!(
+                        e.as_ref(),
+                        crate::syntax::cst::Expr::Literal(LitVal::Float(_), _)
+                    ),
                     _ => false,
                 };
 
@@ -949,7 +1498,8 @@ impl TypeInferrer {
                 } else if is_float_arr {
                     self.env.unify(&elem_ty, &Type::Float)?;
                 } else {
-                    self.env.unify(target_ty, &Type::Array(Box::new(elem_ty.clone())))?;
+                    self.env
+                        .unify(target_ty, &Type::Array(Box::new(elem_ty.clone())))?;
                 }
 
                 for seg in segments {
@@ -998,11 +1548,16 @@ mod tests {
         let resolved = resolve(&module).expect("resolved");
         let ssa = build_ssa_program(&resolved, &module);
         let mut inferrer = TypeInferrer::new();
-        let types = inferrer.infer_function(&ssa.functions[0]).expect("inferred");
+        let types = inferrer
+            .infer_function(&ssa.functions[0])
+            .expect("inferred");
 
         // The array literal must resolve to Type::IntArray!
         let has_int_array = types.values().any(|t| *t == Type::IntArray);
-        assert!(has_int_array, "Array [10, 20, 30] must infer as specialized Type::IntArray!");
+        assert!(
+            has_int_array,
+            "Array [10, 20, 30] must infer as specialized Type::IntArray!"
+        );
     }
 
     #[test]
@@ -1017,11 +1572,48 @@ mod tests {
         let resolved = resolve(&module).expect("resolved");
         let ssa = build_ssa_program(&resolved, &module);
         let mut inferrer = TypeInferrer::new();
-        let types = inferrer.infer_function(&ssa.functions[0]).expect("inferred");
+        let types = inferrer
+            .infer_function(&ssa.functions[0])
+            .expect("inferred");
 
         // The float array literal must resolve to Type::FloatArray!
         let has_float_array = types.values().any(|t| *t == Type::FloatArray);
-        assert!(has_float_array, "Array [1.5, 2.5, 3.5] must infer as specialized Type::FloatArray!");
+        assert!(
+            has_float_array,
+            "Array [1.5, 2.5, 3.5] must infer as specialized Type::FloatArray!"
+        );
+    }
+
+    #[test]
+    fn test_infer_returning_from_both_if_branches() {
+        let src = r#"
+        fn process_data(tag: String, count: Int) -> String:
+            let prefix = "[RESULT]"
+            if count > 0:
+                return prefix + tag + ": active"
+            else:
+                return prefix + tag + ": inactive"
+        "#;
+        let module = parse(src).expect("parsed");
+        let resolved = resolve(&module).expect("resolved");
+        let ssa = build_ssa_program(&resolved, &module);
+        let mut inferrer = TypeInferrer::new();
+        inferrer
+            .infer_function(&ssa.functions[0])
+            .expect("inferred return type from both branches");
+
+        let merge = ssa.functions[0]
+            .blocks
+            .iter()
+            .find(|block| block.label == "if_merge")
+            .expect("if merge block");
+        assert!(matches!(merge.terminator, SsaTerminator::Unreachable(_)));
+        assert!(
+            !ssa.functions[0]
+                .blocks
+                .iter()
+                .any(|block| matches!(block.terminator, SsaTerminator::Return(None, _)))
+        );
     }
 
     #[test]
@@ -1035,7 +1627,9 @@ mod tests {
         let resolved = resolve(&module).expect("resolved");
         let ssa = build_ssa_program(&resolved, &module);
         let mut inferrer = TypeInferrer::new();
-        let types = inferrer.infer_function(&ssa.functions[0]).expect("inferred");
+        let types = inferrer
+            .infer_function(&ssa.functions[0])
+            .expect("inferred");
 
         // Parameter p must have an open record type with field x!
         let p_val = ssa.functions[0].params[0].1;
@@ -1043,10 +1637,38 @@ mod tests {
         match p_ty {
             Type::Record { fields, row } => {
                 assert!(fields.contains_key("x"));
-                assert!(row.is_some(), "Row variable must be present for duck typing!");
+                assert!(
+                    row.is_some(),
+                    "Row variable must be present for duck typing!"
+                );
             }
             other => panic!("Expected row polymorphic Record type, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_enum_protocol_method_is_used_for_field_access() {
+        let src = r#"
+        enum Shape:
+            Circle(Float)
+
+        impl ToString for Shape:
+            fn to_string(self: Shape) -> String:
+                return "circle"
+
+        fn main() -> String:
+            let shape = :Circle(3.5)
+            return shape.to_string()
+        "#;
+        let module = parse(src).expect("parsed");
+        let resolved = resolve(&module).expect("resolved");
+        let ssa = build_ssa_program(&resolved, &module);
+        let mut inferrer = TypeInferrer::new();
+        inferrer.register_program_declarations(&resolved, &module);
+
+        inferrer
+            .infer_program(&ssa)
+            .expect("enum protocol method should type-check");
     }
 
     #[test]
@@ -1071,13 +1693,17 @@ mod tests {
         let ssa = build_ssa_program(&resolved, &module);
 
         let mut inferrer1 = TypeInferrer::new();
-        let types1 = inferrer1.infer_function(&ssa.functions[0]).expect("inferred");
+        let types1 = inferrer1
+            .infer_function(&ssa.functions[0])
+            .expect("inferred");
         // Parameter n must infer to Type::Int because of 1..10 range!
         let n_val = ssa.functions[0].params[0].1;
         assert_eq!(types1[&n_val], Type::Int);
 
         let mut inferrer2 = TypeInferrer::new();
-        let types2 = inferrer2.infer_function(&ssa.functions[1]).expect("inferred");
+        let types2 = inferrer2
+            .infer_function(&ssa.functions[1])
+            .expect("inferred");
         // Parameter arr is IntArray
         let arr_val = ssa.functions[1].params[0].1;
         assert_eq!(types2[&arr_val], Type::IntArray);
@@ -1126,10 +1752,13 @@ mod tests {
         // Register get_x in inferrer globals
         let p_ty = types_get_x[&p_param].clone();
         let ret_ty = types_get_x[&get_x_fn.blocks[0].instructions[0].dst.unwrap()].clone();
-        inferrer.globals.insert(get_x_fn.name.clone(), Type::Fn {
-            params: vec![p_ty],
-            ret: Box::new(ret_ty),
-        });
+        inferrer.globals.insert(
+            get_x_fn.name.clone(),
+            Type::Fn {
+                params: vec![p_ty],
+                ret: Box::new(ret_ty),
+            },
+        );
 
         // Infer caller passing concrete Point
         let caller_fn = ssa
@@ -1137,7 +1766,9 @@ mod tests {
             .iter()
             .find(|f| f.name.ends_with(".caller"))
             .unwrap();
-        let caller_types = inferrer.infer_function(caller_fn).expect("inferred caller with Point");
+        let caller_types = inferrer
+            .infer_function(caller_fn)
+            .expect("inferred caller with Point");
         assert!(caller_types.values().any(|t| *t == Type::Int));
     }
 
@@ -1175,10 +1806,13 @@ mod tests {
         let p_param = get_x_fn.params[0].1;
         let p_ty = types_get_x[&p_param].clone();
         let ret_ty = types_get_x[&get_x_fn.blocks[0].instructions[0].dst.unwrap()].clone();
-        inferrer.globals.insert(get_x_fn.name.clone(), Type::Fn {
-            params: vec![p_ty],
-            ret: Box::new(ret_ty),
-        });
+        inferrer.globals.insert(
+            get_x_fn.name.clone(),
+            Type::Fn {
+                params: vec![p_ty],
+                ret: Box::new(ret_ty),
+            },
+        );
 
         let caller_fn = ssa
             .functions
@@ -1186,10 +1820,43 @@ mod tests {
             .find(|f| f.name.ends_with(".caller"))
             .unwrap();
         let res = inferrer.infer_function(caller_fn);
-        assert!(res.is_err(), "Passing Color (missing field x) must fail type checking!");
+        assert!(
+            res.is_err(),
+            "Passing Color (missing field x) must fail type checking!"
+        );
         match res.unwrap_err() {
             TypeError::MissingField { field, .. } => assert_eq!(field, "x"),
             other => panic!("expected MissingField, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_struct_type_annotations_preserve_impl_methods() {
+        let src = r#"
+        struct Point:
+            x: Int
+
+        impl Point:
+            fn origin() -> Point:
+                return Point(0)
+
+            fn describe() -> String:
+                return "Point(${self.x})"
+
+        impl ToString for Point:
+            fn to_string() -> String:
+                return self.describe()
+
+        fn main() -> String:
+            let point: Point = Point.origin()
+            return point.to_string()
+        "#;
+        let bytecode = crate::compile(src).expect("struct type annotation retains methods");
+        let mut vm = vmm::vm::IonVM::new(bytecode).expect("initialize VM");
+        vm.run().expect("run VM");
+        assert_eq!(
+            vm.entrypoint_return(),
+            Some(vmm::lang::types::Value::String("Point(0)".to_string()))
+        );
     }
 }

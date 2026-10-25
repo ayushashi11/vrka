@@ -2,13 +2,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use vmm::bytecode::instruction::{Bytecode, Instruction, OperandType};
 use vmm::bytecode::opcode::Opcode;
-use vmm::lang::types::{Function, FunctionType, Object, Protection, Value};
 use vmm::lang::matcher::{ArrayPattern, ListSegment, Pattern};
+use vmm::lang::types::{Function, FunctionType, Object, Protection, Value};
 
 use crate::codegen::regalloc::RegAlloc;
 use crate::mir::ssa::{
     BlockId, SsaFunction, SsaInst, SsaOp, SsaProgram, SsaTerminator, StringPartValue, ValueId,
 };
+use crate::syntax::StructPatternNode;
 use crate::syntax::cst::{BinOp, LitVal, PatternNode, UnaryOp};
 use crate::types::ty::Type;
 
@@ -23,7 +24,10 @@ fn lit_to_value(lit: &LitVal) -> Value {
 }
 
 pub fn resolve_qualified_name(path: &[String]) -> String {
-    match (path.get(0).map(|s| s.as_str()), path.get(1).map(|s| s.as_str())) {
+    match (
+        path.get(0).map(|s| s.as_str()),
+        path.get(1).map(|s| s.as_str()),
+    ) {
         (Some("str") | Some("String"), Some(m)) => match m {
             "len" => "str_len".to_string(),
             other => format!("str_{}", other),
@@ -39,6 +43,8 @@ pub fn resolve_qualified_name(path: &[String]) -> String {
 pub struct CodeEmitter {
     pub functions: Vec<Function>,
     struct_fields: HashMap<String, Vec<String>>,
+    enum_variants: HashMap<String, String>,
+    type_prototypes: HashMap<String, String>,
 }
 
 impl CodeEmitter {
@@ -46,6 +52,8 @@ impl CodeEmitter {
         Self {
             functions: Vec::new(),
             struct_fields: HashMap::new(),
+            enum_variants: HashMap::new(),
+            type_prototypes: HashMap::new(),
         }
     }
 
@@ -64,10 +72,42 @@ impl CodeEmitter {
             .map(|struct_def| {
                 (
                     struct_def.name.clone(),
-                    struct_def.fields.iter().map(|field| field.name.clone()).collect(),
+                    struct_def
+                        .fields
+                        .iter()
+                        .map(|field| field.name.clone())
+                        .collect(),
                 )
             })
             .collect();
+        emitter.enum_variants = program
+            .enums
+            .iter()
+            .flat_map(|enum_def| {
+                enum_def
+                    .variants
+                    .iter()
+                    .map(|variant| (variant.name.clone(), enum_def.compiled_name.clone()))
+            })
+            .collect();
+        for struct_def in &program.structs {
+            emitter
+                .type_prototypes
+                .insert(struct_def.name.clone(), struct_def.compiled_name.clone());
+            emitter.type_prototypes.insert(
+                struct_def.compiled_name.clone(),
+                struct_def.compiled_name.clone(),
+            );
+        }
+        for enum_def in &program.enums {
+            emitter
+                .type_prototypes
+                .insert(enum_def.name.clone(), enum_def.compiled_name.clone());
+            emitter.type_prototypes.insert(
+                enum_def.compiled_name.clone(),
+                enum_def.compiled_name.clone(),
+            );
+        }
         for func in &program.functions {
             let fn_types = type_maps.and_then(|m| m.get(&func.name));
             let compiled = emitter.emit_function_with_types(func, fn_types);
@@ -95,6 +135,11 @@ impl CodeEmitter {
             .iter()
             .map(|struct_def| {
                 let mut object = Object::new(None);
+                object.set_property(
+                    "@",
+                    Value::String(struct_def.compiled_name.clone()),
+                    Protection::Readonly,
+                );
                 for field in &struct_def.fields {
                     object.set_property(&field.name, Value::Nil, Protection::Writeable);
                 }
@@ -119,6 +164,54 @@ impl CodeEmitter {
                     Arc::new(RwLock::new(object)),
                 )
             })
+            .chain(program.enums.iter().map(|enum_def| {
+                let mut object = Object::new(None);
+                object.set_property(
+                    "@",
+                    Value::String(enum_def.compiled_name.clone()),
+                    Protection::Readonly,
+                );
+                for function in &program.functions {
+                    let Some(suffix) = function.name.strip_prefix(&enum_def.compiled_name) else {
+                        continue;
+                    };
+                    let suffix = if suffix.starts_with('<') {
+                        let Some(generic_end) = suffix.find('>') else {
+                            continue;
+                        };
+                        &suffix[generic_end + 1..]
+                    } else {
+                        suffix
+                    };
+                    let Some(method_path) = suffix.strip_prefix('.') else {
+                        continue;
+                    };
+                    let Some(method_name) = method_path.rsplit('.').next() else {
+                        continue;
+                    };
+                    if method_name.is_empty() {
+                        continue;
+                    }
+                    if let Some(argument_count) = function_by_name.get(&function.name) {
+                        let method_ref = Function::new(
+                            function.name.clone(),
+                            Vec::new(),
+                            0,
+                            *argument_count,
+                            FunctionType::Regular,
+                        );
+                        object.set_property(
+                            method_name,
+                            Value::Function(Arc::new(RwLock::new(method_ref))),
+                            Protection::Writeable,
+                        );
+                    }
+                }
+                (
+                    enum_def.compiled_name.clone(),
+                    Arc::new(RwLock::new(object)),
+                )
+            }))
             .collect();
 
         Bytecode {
@@ -185,7 +278,9 @@ impl CodeEmitter {
                         match &inst.op {
                             SsaOp::Unary(op, val) => {
                                 if let Some(lit) = const_values.get(val).cloned() {
-                                    if let Some(folded) = crate::mir::builder::eval_unary_const(*op, &lit) {
+                                    if let Some(folded) =
+                                        crate::mir::builder::eval_unary_const(*op, &lit)
+                                    {
                                         const_values.insert(dst, folded);
                                         changed = true;
                                     }
@@ -196,7 +291,9 @@ impl CodeEmitter {
                                     const_values.get(left).cloned(),
                                     const_values.get(right).cloned(),
                                 ) {
-                                    if let Some(folded) = crate::mir::builder::eval_binary_const(*op, &l_lit, &r_lit) {
+                                    if let Some(folded) =
+                                        crate::mir::builder::eval_binary_const(*op, &l_lit, &r_lit)
+                                    {
                                         const_values.insert(dst, folded);
                                         changed = true;
                                     }
@@ -301,21 +398,31 @@ impl CodeEmitter {
                 }
                 SsaTerminator::Goto(target, _) => {
                     // Check if target has phis coming from this block
-                    self.emit_phi_moves(func, block.id, *target, &regalloc, &const_values, &mut instructions);
+                    self.emit_phi_moves(
+                        func,
+                        block.id,
+                        *target,
+                        &regalloc,
+                        &const_values,
+                        &mut instructions,
+                    );
                     let jump_idx = instructions.len();
-                    instructions.push(Instruction::new(
-                        Opcode::Jump,
-                        vec![OperandType::Offset(0)],
-                    ));
+                    instructions.push(Instruction::new(Opcode::Jump, vec![OperandType::Offset(0)]));
                     jump_fixups.push((jump_idx, 0, *target));
                 }
-                SsaTerminator::Branch { cond, then_bb, else_bb, .. } => {
+                SsaTerminator::Branch {
+                    cond,
+                    then_bb,
+                    else_bb,
+                    ..
+                } => {
                     let cond_op = if let Some(lit) = const_values.get(cond) {
                         OperandType::Constant(lit_to_value(lit))
                     } else {
                         OperandType::Register(regalloc.get(*cond))
                     };
-                    if b_idx + 1 < ordered_blocks.len() && ordered_blocks[b_idx + 1].id == *then_bb {
+                    if b_idx + 1 < ordered_blocks.len() && ordered_blocks[b_idx + 1].id == *then_bb
+                    {
                         // Inverted branch: JumpFalse to else_bb, fall-through to then_bb!
                         let else_jump_idx = instructions.len();
                         instructions.push(Instruction::new(
@@ -332,16 +439,26 @@ impl CodeEmitter {
                         jump_fixups.push((then_jump_idx, 1, *then_bb));
 
                         // Else fall-through or jump
-                        self.emit_phi_moves(func, block.id, *else_bb, &regalloc, &const_values, &mut instructions);
+                        self.emit_phi_moves(
+                            func,
+                            block.id,
+                            *else_bb,
+                            &regalloc,
+                            &const_values,
+                            &mut instructions,
+                        );
                         let else_jump_idx = instructions.len();
-                        instructions.push(Instruction::new(
-                            Opcode::Jump,
-                            vec![OperandType::Offset(0)],
-                        ));
+                        instructions
+                            .push(Instruction::new(Opcode::Jump, vec![OperandType::Offset(0)]));
                         jump_fixups.push((else_jump_idx, 0, *else_bb));
                     }
                 }
-                SsaTerminator::Match { target, arms, default_bb, .. } => {
+                SsaTerminator::Match {
+                    target,
+                    arms,
+                    default_bb,
+                    ..
+                } => {
                     let target_op = if let Some(lit) = const_values.get(target) {
                         OperandType::Constant(lit_to_value(lit))
                     } else {
@@ -390,7 +507,9 @@ impl CodeEmitter {
 
         // Detect if function uses closure upvalues
         let is_closure = instructions.iter().any(|i| {
-            i.operands.iter().any(|op| matches!(op, OperandType::Captured(_)))
+            i.operands
+                .iter()
+                .any(|op| matches!(op, OperandType::Captured(_)))
         });
 
         Function {
@@ -468,7 +587,8 @@ impl CodeEmitter {
                 }
             });
 
-            let fuse_idx = can_fuse.and_then(|r| pending_moves.iter().position(|(src, _)| *src == r));
+            let fuse_idx =
+                can_fuse.and_then(|r| pending_moves.iter().position(|(src, _)| *src == r));
 
             if let Some(idx) = fuse_idx {
                 let (_, dst_reg) = pending_moves.remove(idx);
@@ -479,7 +599,10 @@ impl CodeEmitter {
                 for (src_reg, dst_reg) in pending_moves {
                     instructions.push(Instruction::new(
                         Opcode::LoadConst,
-                        vec![OperandType::Register(src_reg), OperandType::Register(dst_reg)],
+                        vec![
+                            OperandType::Register(src_reg),
+                            OperandType::Register(dst_reg),
+                        ],
                     ));
                 }
                 for (val, dst_reg) in const_moves {
@@ -495,7 +618,10 @@ impl CodeEmitter {
                 for (src_reg, dst_reg) in pending_moves {
                     instructions.push(Instruction::new(
                         Opcode::LoadConst,
-                        vec![OperandType::Register(src_reg), OperandType::Register(dst_reg)],
+                        vec![
+                            OperandType::Register(src_reg),
+                            OperandType::Register(dst_reg),
+                        ],
                     ));
                 }
                 for (val, dst_reg) in const_moves {
@@ -539,218 +665,536 @@ impl CodeEmitter {
                     if let Some(lit) = const_values.get(v) {
                         return matches!(lit, LitVal::Int(_));
                     }
-                    types.and_then(|t| t.get(v)).map(|ty| *ty == Type::Int).unwrap_or(false)
+                    types
+                        .and_then(|t| t.get(v))
+                        .map(|ty| *ty == Type::Int)
+                        .unwrap_or(false)
                 };
                 let is_float_val = |v: &ValueId| -> bool {
                     if let Some(lit) = const_values.get(v) {
                         return matches!(lit, LitVal::Float(_));
                     }
-                    types.and_then(|t| t.get(v)).map(|ty| *ty == Type::Float).unwrap_or(false)
+                    types
+                        .and_then(|t| t.get(v))
+                        .map(|ty| *ty == Type::Float)
+                        .unwrap_or(false)
+                };
+                let is_string_val = |v: &ValueId| -> bool {
+                    if let Some(lit) = const_values.get(v) {
+                        return matches!(lit, LitVal::String(_));
+                    }
+                    types
+                        .and_then(|t| t.get(v))
+                        .map(|ty| *ty == Type::String)
+                        .unwrap_or(false)
                 };
 
-                let is_int_op = is_int_val(left) || is_int_val(right) || inst.dst.map(|d| is_int_val(&d)).unwrap_or(false);
-                let is_float_op = is_float_val(left) || is_float_val(right) || inst.dst.map(|d| is_float_val(&d)).unwrap_or(false);
+                let is_int_op = is_int_val(left)
+                    || is_int_val(right)
+                    || inst.dst.map(|d| is_int_val(&d)).unwrap_or(false);
+                let is_float_op = is_float_val(left)
+                    || is_float_val(right)
+                    || inst.dst.map(|d| is_float_val(&d)).unwrap_or(false);
+                let is_string_op = is_string_val(left)
+                    || is_string_val(right)
+                    || inst.dst.map(|d| is_string_val(&d)).unwrap_or(false);
 
                 let (opcode, op0, op1) = match op {
                     BinOp::Add => {
-                        if is_int_op {
-                            if let Some(LitVal::Int(c)) = r_const {
-                                (Opcode::IAddRCR, OperandType::Register(regalloc.get(*left)), OperandType::Constant(Value::Int(*c)))
-                            } else if let Some(LitVal::Int(c)) = l_const {
-                                (Opcode::IAddRCR, OperandType::Register(regalloc.get(*right)), OperandType::Constant(Value::Int(*c)))
+                        if is_string_op {
+                            let op0 = if let Some(l) = l_const {
+                                OperandType::Constant(lit_to_value(l))
                             } else {
-                                (Opcode::IAddRRR, OperandType::Register(regalloc.get(*left)), OperandType::Register(regalloc.get(*right)))
+                                OperandType::Register(regalloc.get(*left))
+                            };
+                            let op1 = if let Some(r) = r_const {
+                                OperandType::Constant(lit_to_value(r))
+                            } else {
+                                OperandType::Register(regalloc.get(*right))
+                            };
+                            (Opcode::SConcatRRR, op0, op1)
+                        } else if is_int_op {
+                            if let Some(LitVal::Int(c)) = r_const {
+                                (
+                                    Opcode::IAddRCR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Constant(Value::Int(*c)),
+                                )
+                            } else if let Some(LitVal::Int(c)) = l_const {
+                                (
+                                    Opcode::IAddRCR,
+                                    OperandType::Register(regalloc.get(*right)),
+                                    OperandType::Constant(Value::Int(*c)),
+                                )
+                            } else {
+                                (
+                                    Opcode::IAddRRR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Register(regalloc.get(*right)),
+                                )
                             }
                         } else if is_float_op {
                             if let Some(LitVal::Float(c)) = r_const {
-                                (Opcode::FAddRCR, OperandType::Register(regalloc.get(*left)), OperandType::Constant(Value::Float(*c)))
+                                (
+                                    Opcode::FAddRCR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Constant(Value::Float(*c)),
+                                )
                             } else if let Some(LitVal::Float(c)) = l_const {
-                                (Opcode::FAddRCR, OperandType::Register(regalloc.get(*right)), OperandType::Constant(Value::Float(*c)))
+                                (
+                                    Opcode::FAddRCR,
+                                    OperandType::Register(regalloc.get(*right)),
+                                    OperandType::Constant(Value::Float(*c)),
+                                )
                             } else {
-                                (Opcode::FAddRRR, OperandType::Register(regalloc.get(*left)), OperandType::Register(regalloc.get(*right)))
+                                (
+                                    Opcode::FAddRRR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Register(regalloc.get(*right)),
+                                )
                             }
                         } else {
-                            let op0 = if let Some(l) = l_const { OperandType::Constant(lit_to_value(l)) } else { OperandType::Register(regalloc.get(*left)) };
-                            let op1 = if let Some(r) = r_const { OperandType::Constant(lit_to_value(r)) } else { OperandType::Register(regalloc.get(*right)) };
+                            let op0 = if let Some(l) = l_const {
+                                OperandType::Constant(lit_to_value(l))
+                            } else {
+                                OperandType::Register(regalloc.get(*left))
+                            };
+                            let op1 = if let Some(r) = r_const {
+                                OperandType::Constant(lit_to_value(r))
+                            } else {
+                                OperandType::Register(regalloc.get(*right))
+                            };
                             (Opcode::Add, op0, op1)
                         }
                     }
                     BinOp::Sub => {
                         if is_int_op {
                             if let Some(LitVal::Int(c)) = r_const {
-                                (Opcode::ISubRCR, OperandType::Register(regalloc.get(*left)), OperandType::Constant(Value::Int(*c)))
+                                (
+                                    Opcode::ISubRCR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Constant(Value::Int(*c)),
+                                )
                             } else if let Some(LitVal::Int(c)) = l_const {
-                                (Opcode::ISubCRR, OperandType::Constant(Value::Int(*c)), OperandType::Register(regalloc.get(*right)))
+                                (
+                                    Opcode::ISubCRR,
+                                    OperandType::Constant(Value::Int(*c)),
+                                    OperandType::Register(regalloc.get(*right)),
+                                )
                             } else {
-                                (Opcode::ISubRRR, OperandType::Register(regalloc.get(*left)), OperandType::Register(regalloc.get(*right)))
+                                (
+                                    Opcode::ISubRRR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Register(regalloc.get(*right)),
+                                )
                             }
                         } else if is_float_op {
                             if let Some(LitVal::Float(c)) = r_const {
-                                (Opcode::FSubRCR, OperandType::Register(regalloc.get(*left)), OperandType::Constant(Value::Float(*c)))
+                                (
+                                    Opcode::FSubRCR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Constant(Value::Float(*c)),
+                                )
                             } else if let Some(LitVal::Float(c)) = l_const {
-                                (Opcode::FSubCRR, OperandType::Constant(Value::Float(*c)), OperandType::Register(regalloc.get(*right)))
+                                (
+                                    Opcode::FSubCRR,
+                                    OperandType::Constant(Value::Float(*c)),
+                                    OperandType::Register(regalloc.get(*right)),
+                                )
                             } else {
-                                (Opcode::FSubRRR, OperandType::Register(regalloc.get(*left)), OperandType::Register(regalloc.get(*right)))
+                                (
+                                    Opcode::FSubRRR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Register(regalloc.get(*right)),
+                                )
                             }
                         } else {
-                            let op0 = if let Some(l) = l_const { OperandType::Constant(lit_to_value(l)) } else { OperandType::Register(regalloc.get(*left)) };
-                            let op1 = if let Some(r) = r_const { OperandType::Constant(lit_to_value(r)) } else { OperandType::Register(regalloc.get(*right)) };
+                            let op0 = if let Some(l) = l_const {
+                                OperandType::Constant(lit_to_value(l))
+                            } else {
+                                OperandType::Register(regalloc.get(*left))
+                            };
+                            let op1 = if let Some(r) = r_const {
+                                OperandType::Constant(lit_to_value(r))
+                            } else {
+                                OperandType::Register(regalloc.get(*right))
+                            };
                             (Opcode::Sub, op0, op1)
                         }
                     }
                     BinOp::Mul => {
                         if is_int_op {
                             if let Some(LitVal::Int(c)) = r_const {
-                                (Opcode::IMulRCR, OperandType::Register(regalloc.get(*left)), OperandType::Constant(Value::Int(*c)))
+                                (
+                                    Opcode::IMulRCR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Constant(Value::Int(*c)),
+                                )
                             } else if let Some(LitVal::Int(c)) = l_const {
-                                (Opcode::IMulRCR, OperandType::Register(regalloc.get(*right)), OperandType::Constant(Value::Int(*c)))
+                                (
+                                    Opcode::IMulRCR,
+                                    OperandType::Register(regalloc.get(*right)),
+                                    OperandType::Constant(Value::Int(*c)),
+                                )
                             } else {
-                                (Opcode::IMulRRR, OperandType::Register(regalloc.get(*left)), OperandType::Register(regalloc.get(*right)))
+                                (
+                                    Opcode::IMulRRR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Register(regalloc.get(*right)),
+                                )
                             }
                         } else if is_float_op {
                             if let Some(LitVal::Float(c)) = r_const {
-                                (Opcode::FMulRCR, OperandType::Register(regalloc.get(*left)), OperandType::Constant(Value::Float(*c)))
+                                (
+                                    Opcode::FMulRCR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Constant(Value::Float(*c)),
+                                )
                             } else if let Some(LitVal::Float(c)) = l_const {
-                                (Opcode::FMulRCR, OperandType::Register(regalloc.get(*right)), OperandType::Constant(Value::Float(*c)))
+                                (
+                                    Opcode::FMulRCR,
+                                    OperandType::Register(regalloc.get(*right)),
+                                    OperandType::Constant(Value::Float(*c)),
+                                )
                             } else {
-                                (Opcode::FMulRRR, OperandType::Register(regalloc.get(*left)), OperandType::Register(regalloc.get(*right)))
+                                (
+                                    Opcode::FMulRRR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Register(regalloc.get(*right)),
+                                )
                             }
                         } else {
-                            let op0 = if let Some(l) = l_const { OperandType::Constant(lit_to_value(l)) } else { OperandType::Register(regalloc.get(*left)) };
-                            let op1 = if let Some(r) = r_const { OperandType::Constant(lit_to_value(r)) } else { OperandType::Register(regalloc.get(*right)) };
+                            let op0 = if let Some(l) = l_const {
+                                OperandType::Constant(lit_to_value(l))
+                            } else {
+                                OperandType::Register(regalloc.get(*left))
+                            };
+                            let op1 = if let Some(r) = r_const {
+                                OperandType::Constant(lit_to_value(r))
+                            } else {
+                                OperandType::Register(regalloc.get(*right))
+                            };
                             (Opcode::Mul, op0, op1)
                         }
                     }
                     BinOp::Div => {
                         if is_int_op {
                             if let Some(LitVal::Int(c)) = r_const {
-                                (Opcode::IDivRCR, OperandType::Register(regalloc.get(*left)), OperandType::Constant(Value::Int(*c)))
+                                (
+                                    Opcode::IDivRCR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Constant(Value::Int(*c)),
+                                )
                             } else if let Some(LitVal::Int(c)) = l_const {
-                                (Opcode::IDivCRR, OperandType::Constant(Value::Int(*c)), OperandType::Register(regalloc.get(*right)))
+                                (
+                                    Opcode::IDivCRR,
+                                    OperandType::Constant(Value::Int(*c)),
+                                    OperandType::Register(regalloc.get(*right)),
+                                )
                             } else {
-                                (Opcode::Div, OperandType::Register(regalloc.get(*left)), OperandType::Register(regalloc.get(*right)))
+                                (
+                                    Opcode::Div,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Register(regalloc.get(*right)),
+                                )
                             }
                         } else if is_float_op {
                             if let Some(LitVal::Float(c)) = r_const {
-                                (Opcode::FDivRCR, OperandType::Register(regalloc.get(*left)), OperandType::Constant(Value::Float(*c)))
+                                (
+                                    Opcode::FDivRCR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Constant(Value::Float(*c)),
+                                )
                             } else if let Some(LitVal::Float(c)) = l_const {
-                                (Opcode::FDivCRR, OperandType::Constant(Value::Float(*c)), OperandType::Register(regalloc.get(*right)))
+                                (
+                                    Opcode::FDivCRR,
+                                    OperandType::Constant(Value::Float(*c)),
+                                    OperandType::Register(regalloc.get(*right)),
+                                )
                             } else {
-                                (Opcode::FDivRRR, OperandType::Register(regalloc.get(*left)), OperandType::Register(regalloc.get(*right)))
+                                (
+                                    Opcode::FDivRRR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Register(regalloc.get(*right)),
+                                )
                             }
                         } else {
-                            let op0 = if let Some(l) = l_const { OperandType::Constant(lit_to_value(l)) } else { OperandType::Register(regalloc.get(*left)) };
-                            let op1 = if let Some(r) = r_const { OperandType::Constant(lit_to_value(r)) } else { OperandType::Register(regalloc.get(*right)) };
+                            let op0 = if let Some(l) = l_const {
+                                OperandType::Constant(lit_to_value(l))
+                            } else {
+                                OperandType::Register(regalloc.get(*left))
+                            };
+                            let op1 = if let Some(r) = r_const {
+                                OperandType::Constant(lit_to_value(r))
+                            } else {
+                                OperandType::Register(regalloc.get(*right))
+                            };
                             (Opcode::Div, op0, op1)
                         }
                     }
                     BinOp::Rem => {
                         if is_int_op {
                             if let Some(LitVal::Int(c)) = r_const {
-                                (Opcode::IRemRCR, OperandType::Register(regalloc.get(*left)), OperandType::Constant(Value::Int(*c)))
+                                (
+                                    Opcode::IRemRCR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Constant(Value::Int(*c)),
+                                )
                             } else if let Some(LitVal::Int(c)) = l_const {
-                                (Opcode::IRemCRR, OperandType::Constant(Value::Int(*c)), OperandType::Register(regalloc.get(*right)))
+                                (
+                                    Opcode::IRemCRR,
+                                    OperandType::Constant(Value::Int(*c)),
+                                    OperandType::Register(regalloc.get(*right)),
+                                )
                             } else {
-                                (Opcode::Rem, OperandType::Register(regalloc.get(*left)), OperandType::Register(regalloc.get(*right)))
+                                (
+                                    Opcode::Rem,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Register(regalloc.get(*right)),
+                                )
                             }
                         } else {
-                            let op0 = if let Some(l) = l_const { OperandType::Constant(lit_to_value(l)) } else { OperandType::Register(regalloc.get(*left)) };
-                            let op1 = if let Some(r) = r_const { OperandType::Constant(lit_to_value(r)) } else { OperandType::Register(regalloc.get(*right)) };
+                            let op0 = if let Some(l) = l_const {
+                                OperandType::Constant(lit_to_value(l))
+                            } else {
+                                OperandType::Register(regalloc.get(*left))
+                            };
+                            let op1 = if let Some(r) = r_const {
+                                OperandType::Constant(lit_to_value(r))
+                            } else {
+                                OperandType::Register(regalloc.get(*right))
+                            };
                             (Opcode::Rem, op0, op1)
                         }
                     }
                     BinOp::Gt => {
                         if is_int_op {
                             if let Some(LitVal::Int(c)) = r_const {
-                                (Opcode::IGtRCR, OperandType::Register(regalloc.get(*left)), OperandType::Constant(Value::Int(*c)))
+                                (
+                                    Opcode::IGtRCR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Constant(Value::Int(*c)),
+                                )
                             } else if let Some(LitVal::Int(c)) = l_const {
-                                (Opcode::IGtCRR, OperandType::Constant(Value::Int(*c)), OperandType::Register(regalloc.get(*right)))
+                                (
+                                    Opcode::IGtCRR,
+                                    OperandType::Constant(Value::Int(*c)),
+                                    OperandType::Register(regalloc.get(*right)),
+                                )
                             } else {
-                                (Opcode::IGtRRR, OperandType::Register(regalloc.get(*left)), OperandType::Register(regalloc.get(*right)))
+                                (
+                                    Opcode::IGtRRR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Register(regalloc.get(*right)),
+                                )
                             }
                         } else if is_float_op {
                             if let Some(LitVal::Float(c)) = r_const {
-                                (Opcode::FGtRCR, OperandType::Register(regalloc.get(*left)), OperandType::Constant(Value::Float(*c)))
+                                (
+                                    Opcode::FGtRCR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Constant(Value::Float(*c)),
+                                )
                             } else if let Some(LitVal::Float(c)) = l_const {
-                                (Opcode::FLtRCR, OperandType::Register(regalloc.get(*right)), OperandType::Constant(Value::Float(*c)))
+                                (
+                                    Opcode::FLtRCR,
+                                    OperandType::Register(regalloc.get(*right)),
+                                    OperandType::Constant(Value::Float(*c)),
+                                )
                             } else {
-                                (Opcode::FGtRRR, OperandType::Register(regalloc.get(*left)), OperandType::Register(regalloc.get(*right)))
+                                (
+                                    Opcode::FGtRRR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Register(regalloc.get(*right)),
+                                )
                             }
                         } else {
-                            let op0 = if let Some(l) = l_const { OperandType::Constant(lit_to_value(l)) } else { OperandType::Register(regalloc.get(*left)) };
-                            let op1 = if let Some(r) = r_const { OperandType::Constant(lit_to_value(r)) } else { OperandType::Register(regalloc.get(*right)) };
+                            let op0 = if let Some(l) = l_const {
+                                OperandType::Constant(lit_to_value(l))
+                            } else {
+                                OperandType::Register(regalloc.get(*left))
+                            };
+                            let op1 = if let Some(r) = r_const {
+                                OperandType::Constant(lit_to_value(r))
+                            } else {
+                                OperandType::Register(regalloc.get(*right))
+                            };
                             (Opcode::Gt, op0, op1)
                         }
                     }
                     BinOp::Lt => {
                         if is_int_op {
                             if let Some(LitVal::Int(c)) = r_const {
-                                (Opcode::ILtRCR, OperandType::Register(regalloc.get(*left)), OperandType::Constant(Value::Int(*c)))
+                                (
+                                    Opcode::ILtRCR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Constant(Value::Int(*c)),
+                                )
                             } else if let Some(LitVal::Int(c)) = l_const {
-                                (Opcode::ILtCRR, OperandType::Constant(Value::Int(*c)), OperandType::Register(regalloc.get(*right)))
+                                (
+                                    Opcode::ILtCRR,
+                                    OperandType::Constant(Value::Int(*c)),
+                                    OperandType::Register(regalloc.get(*right)),
+                                )
                             } else {
-                                (Opcode::ILtRRR, OperandType::Register(regalloc.get(*left)), OperandType::Register(regalloc.get(*right)))
+                                (
+                                    Opcode::ILtRRR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Register(regalloc.get(*right)),
+                                )
                             }
                         } else if is_float_op {
                             if let Some(LitVal::Float(c)) = r_const {
-                                (Opcode::FLtRCR, OperandType::Register(regalloc.get(*left)), OperandType::Constant(Value::Float(*c)))
+                                (
+                                    Opcode::FLtRCR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Constant(Value::Float(*c)),
+                                )
                             } else if let Some(LitVal::Float(c)) = l_const {
-                                (Opcode::FGtRCR, OperandType::Register(regalloc.get(*right)), OperandType::Constant(Value::Float(*c)))
+                                (
+                                    Opcode::FGtRCR,
+                                    OperandType::Register(regalloc.get(*right)),
+                                    OperandType::Constant(Value::Float(*c)),
+                                )
                             } else {
-                                (Opcode::FLtRRR, OperandType::Register(regalloc.get(*left)), OperandType::Register(regalloc.get(*right)))
+                                (
+                                    Opcode::FLtRRR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Register(regalloc.get(*right)),
+                                )
                             }
                         } else {
-                            let op0 = if let Some(l) = l_const { OperandType::Constant(lit_to_value(l)) } else { OperandType::Register(regalloc.get(*left)) };
-                            let op1 = if let Some(r) = r_const { OperandType::Constant(lit_to_value(r)) } else { OperandType::Register(regalloc.get(*right)) };
+                            let op0 = if let Some(l) = l_const {
+                                OperandType::Constant(lit_to_value(l))
+                            } else {
+                                OperandType::Register(regalloc.get(*left))
+                            };
+                            let op1 = if let Some(r) = r_const {
+                                OperandType::Constant(lit_to_value(r))
+                            } else {
+                                OperandType::Register(regalloc.get(*right))
+                            };
                             (Opcode::Lt, op0, op1)
                         }
                     }
                     BinOp::Eq => {
                         if is_int_op {
                             if let Some(LitVal::Int(c)) = r_const {
-                                (Opcode::IEqRCR, OperandType::Register(regalloc.get(*left)), OperandType::Constant(Value::Int(*c)))
+                                (
+                                    Opcode::IEqRCR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Constant(Value::Int(*c)),
+                                )
                             } else if let Some(LitVal::Int(c)) = l_const {
-                                (Opcode::IEqRCR, OperandType::Register(regalloc.get(*right)), OperandType::Constant(Value::Int(*c)))
+                                (
+                                    Opcode::IEqRCR,
+                                    OperandType::Register(regalloc.get(*right)),
+                                    OperandType::Constant(Value::Int(*c)),
+                                )
                             } else {
-                                (Opcode::IEqRRR, OperandType::Register(regalloc.get(*left)), OperandType::Register(regalloc.get(*right)))
+                                (
+                                    Opcode::IEqRRR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Register(regalloc.get(*right)),
+                                )
                             }
                         } else if is_float_op {
                             if let Some(LitVal::Float(c)) = r_const {
-                                (Opcode::FEqRCR, OperandType::Register(regalloc.get(*left)), OperandType::Constant(Value::Float(*c)))
+                                (
+                                    Opcode::FEqRCR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Constant(Value::Float(*c)),
+                                )
                             } else if let Some(LitVal::Float(c)) = l_const {
-                                (Opcode::FEqRCR, OperandType::Register(regalloc.get(*right)), OperandType::Constant(Value::Float(*c)))
+                                (
+                                    Opcode::FEqRCR,
+                                    OperandType::Register(regalloc.get(*right)),
+                                    OperandType::Constant(Value::Float(*c)),
+                                )
                             } else {
-                                (Opcode::FEqRRR, OperandType::Register(regalloc.get(*left)), OperandType::Register(regalloc.get(*right)))
+                                (
+                                    Opcode::FEqRRR,
+                                    OperandType::Register(regalloc.get(*left)),
+                                    OperandType::Register(regalloc.get(*right)),
+                                )
                             }
                         } else {
-                            let op0 = if let Some(l) = l_const { OperandType::Constant(lit_to_value(l)) } else { OperandType::Register(regalloc.get(*left)) };
-                            let op1 = if let Some(r) = r_const { OperandType::Constant(lit_to_value(r)) } else { OperandType::Register(regalloc.get(*right)) };
+                            let op0 = if let Some(l) = l_const {
+                                OperandType::Constant(lit_to_value(l))
+                            } else {
+                                OperandType::Register(regalloc.get(*left))
+                            };
+                            let op1 = if let Some(r) = r_const {
+                                OperandType::Constant(lit_to_value(r))
+                            } else {
+                                OperandType::Register(regalloc.get(*right))
+                            };
                             (Opcode::Eq, op0, op1)
                         }
                     }
                     BinOp::NotEq => {
-                        let op0 = if let Some(l) = l_const { OperandType::Constant(lit_to_value(l)) } else { OperandType::Register(regalloc.get(*left)) };
-                        let op1 = if let Some(r) = r_const { OperandType::Constant(lit_to_value(r)) } else { OperandType::Register(regalloc.get(*right)) };
+                        let op0 = if let Some(l) = l_const {
+                            OperandType::Constant(lit_to_value(l))
+                        } else {
+                            OperandType::Register(regalloc.get(*left))
+                        };
+                        let op1 = if let Some(r) = r_const {
+                            OperandType::Constant(lit_to_value(r))
+                        } else {
+                            OperandType::Register(regalloc.get(*right))
+                        };
                         (Opcode::Neq, op0, op1)
                     }
                     BinOp::LtEq => {
-                        let op0 = if let Some(l) = l_const { OperandType::Constant(lit_to_value(l)) } else { OperandType::Register(regalloc.get(*left)) };
-                        let op1 = if let Some(r) = r_const { OperandType::Constant(lit_to_value(r)) } else { OperandType::Register(regalloc.get(*right)) };
+                        let op0 = if let Some(l) = l_const {
+                            OperandType::Constant(lit_to_value(l))
+                        } else {
+                            OperandType::Register(regalloc.get(*left))
+                        };
+                        let op1 = if let Some(r) = r_const {
+                            OperandType::Constant(lit_to_value(r))
+                        } else {
+                            OperandType::Register(regalloc.get(*right))
+                        };
                         (Opcode::Le, op0, op1)
                     }
                     BinOp::GtEq => {
-                        let op0 = if let Some(l) = l_const { OperandType::Constant(lit_to_value(l)) } else { OperandType::Register(regalloc.get(*left)) };
-                        let op1 = if let Some(r) = r_const { OperandType::Constant(lit_to_value(r)) } else { OperandType::Register(regalloc.get(*right)) };
+                        let op0 = if let Some(l) = l_const {
+                            OperandType::Constant(lit_to_value(l))
+                        } else {
+                            OperandType::Register(regalloc.get(*left))
+                        };
+                        let op1 = if let Some(r) = r_const {
+                            OperandType::Constant(lit_to_value(r))
+                        } else {
+                            OperandType::Register(regalloc.get(*right))
+                        };
                         (Opcode::Ge, op0, op1)
                     }
                     BinOp::And => {
-                        let op0 = if let Some(l) = l_const { OperandType::Constant(lit_to_value(l)) } else { OperandType::Register(regalloc.get(*left)) };
-                        let op1 = if let Some(r) = r_const { OperandType::Constant(lit_to_value(r)) } else { OperandType::Register(regalloc.get(*right)) };
+                        let op0 = if let Some(l) = l_const {
+                            OperandType::Constant(lit_to_value(l))
+                        } else {
+                            OperandType::Register(regalloc.get(*left))
+                        };
+                        let op1 = if let Some(r) = r_const {
+                            OperandType::Constant(lit_to_value(r))
+                        } else {
+                            OperandType::Register(regalloc.get(*right))
+                        };
                         (Opcode::And, op0, op1)
                     }
                     BinOp::Or => {
-                        let op0 = if let Some(l) = l_const { OperandType::Constant(lit_to_value(l)) } else { OperandType::Register(regalloc.get(*left)) };
-                        let op1 = if let Some(r) = r_const { OperandType::Constant(lit_to_value(r)) } else { OperandType::Register(regalloc.get(*right)) };
+                        let op0 = if let Some(l) = l_const {
+                            OperandType::Constant(lit_to_value(l))
+                        } else {
+                            OperandType::Register(regalloc.get(*left))
+                        };
+                        let op1 = if let Some(r) = r_const {
+                            OperandType::Constant(lit_to_value(r))
+                        } else {
+                            OperandType::Register(regalloc.get(*right))
+                        };
                         (Opcode::Or, op0, op1)
                     }
                 };
@@ -789,14 +1233,12 @@ impl CodeEmitter {
             SsaOp::Call { callee, args } => {
                 let primitive_format = if args.len() == 1 {
                     match value_ops.get(callee) {
-                        Some(SsaOp::FieldAccess { base, field }) if field == "format" => {
-                            types
-                                .and_then(|types| types.get(base))
-                                .filter(|ty| {
-                                    matches!(ty, Type::Int | Type::Float | Type::Bool | Type::String)
-                                })
-                                .map(|_| (*base, args[0]))
-                        }
+                        Some(SsaOp::FieldAccess { base, field }) if field == "format" => types
+                            .and_then(|types| types.get(base))
+                            .filter(|ty| {
+                                matches!(ty, Type::Int | Type::Float | Type::Bool | Type::String)
+                            })
+                            .map(|_| (*base, args[0])),
                         _ => None,
                     }
                 } else {
@@ -866,9 +1308,14 @@ impl CodeEmitter {
             }
             SsaOp::GlobalRef(name) => {
                 let dst = dst_reg.expect("global ref requires dst");
+                let operand = self
+                    .type_prototypes
+                    .get(name)
+                    .map(|prototype| OperandType::Property(prototype.clone()))
+                    .unwrap_or_else(|| OperandType::Function(name.clone()));
                 instructions.push(Instruction::new(
                     Opcode::LoadConst,
-                    vec![OperandType::Function(name.clone()), OperandType::Register(dst)],
+                    vec![operand, OperandType::Register(dst)],
                 ));
             }
             SsaOp::QualifiedGlobal(path) => {
@@ -945,10 +1392,7 @@ impl CodeEmitter {
                     *max_reg += 1;
                     instructions.push(Instruction::new(
                         Opcode::MakeEnv,
-                        vec![
-                            OperandType::Register(r),
-                            OperandType::RegisterList(vec![]),
-                        ],
+                        vec![OperandType::Register(r), OperandType::RegisterList(vec![])],
                     ));
                     r
                 };
@@ -958,6 +1402,46 @@ impl CodeEmitter {
                     vec![
                         OperandType::Function(func.clone()),
                         OperandType::Register(env_reg),
+                        OperandType::Register(dst),
+                    ],
+                ));
+            }
+            SsaOp::MakeEnum {
+                enum_name,
+                variant_name,
+                args,
+            } => {
+                let dst = dst_reg.expect("enum constructor requires dst");
+                let mut arg_regs = Vec::with_capacity(args.len());
+                for arg in args {
+                    if let Some(reg) = regalloc.get_opt(*arg) {
+                        arg_regs.push(reg);
+                    } else if let Some(lit) = const_values.get(arg) {
+                        let reg = *max_reg;
+                        *max_reg += 1;
+                        instructions.push(Instruction::new(
+                            Opcode::LoadConst,
+                            vec![
+                                OperandType::Constant(lit_to_value(lit)),
+                                OperandType::Register(reg),
+                            ],
+                        ));
+                        arg_regs.push(reg);
+                    } else {
+                        arg_regs.push(regalloc.get(*arg));
+                    }
+                }
+                instructions.push(Instruction::new(
+                    Opcode::EMakeEnum,
+                    vec![
+                        OperandType::Constant(Value::String(
+                            self.type_prototypes
+                                .get(enum_name)
+                                .cloned()
+                                .unwrap_or_else(|| enum_name.clone()),
+                        )),
+                        OperandType::Constant(Value::String(variant_name.clone())),
+                        OperandType::RegisterList(arg_regs),
                         OperandType::Register(dst),
                     ],
                 ));
@@ -1051,11 +1535,7 @@ impl CodeEmitter {
                 };
                 instructions.push(Instruction::new(
                     opcode,
-                    vec![
-                        OperandType::Register(b_reg),
-                        idx_op,
-                        v_op,
-                    ],
+                    vec![OperandType::Register(b_reg), idx_op, v_op],
                 ));
             }
             SsaOp::ArrayLit(elems) => {
@@ -1071,7 +1551,9 @@ impl CodeEmitter {
 
                 if is_float_arr {
                     let all_float_consts = !elems.is_empty()
-                        && elems.iter().all(|e| matches!(const_values.get(e), Some(LitVal::Float(_))));
+                        && elems
+                            .iter()
+                            .all(|e| matches!(const_values.get(e), Some(LitVal::Float(_))));
                     if all_float_consts {
                         let floats: Vec<f64> = elems
                             .iter()
@@ -1083,7 +1565,9 @@ impl CodeEmitter {
                         instructions.push(Instruction::new(
                             Opcode::LoadConst,
                             vec![
-                                OperandType::Constant(Value::FloatArray(Arc::new(RwLock::new(floats)))),
+                                OperandType::Constant(Value::FloatArray(Arc::new(RwLock::new(
+                                    floats,
+                                )))),
                                 OperandType::Register(dst),
                             ],
                         ));
@@ -1119,7 +1603,9 @@ impl CodeEmitter {
                     }
                 } else if is_int_arr {
                     let all_int_consts = !elems.is_empty()
-                        && elems.iter().all(|e| matches!(const_values.get(e), Some(LitVal::Int(_))));
+                        && elems
+                            .iter()
+                            .all(|e| matches!(const_values.get(e), Some(LitVal::Int(_))));
                     if all_int_consts {
                         let ints: Vec<i64> = elems
                             .iter()
@@ -1188,7 +1674,10 @@ impl CodeEmitter {
                     }
                     instructions.push(Instruction::new(
                         Opcode::MakeEnv,
-                        vec![OperandType::Register(dst), OperandType::RegisterList(reg_list)],
+                        vec![
+                            OperandType::Register(dst),
+                            OperandType::RegisterList(reg_list),
+                        ],
                     ));
                 }
             }
@@ -1215,10 +1704,18 @@ impl CodeEmitter {
                 }
                 instructions.push(Instruction::new(
                     Opcode::MakeEnv,
-                    vec![OperandType::Register(dst), OperandType::RegisterList(reg_list)],
+                    vec![
+                        OperandType::Register(dst),
+                        OperandType::RegisterList(reg_list),
+                    ],
                 ));
             }
-            SsaOp::NewObject { prototype, fields, args, .. } => {
+            SsaOp::NewObject {
+                prototype,
+                fields,
+                args,
+                ..
+            } => {
                 let dst = dst_reg.expect("new object requires dst");
                 instructions.push(Instruction::new(
                     Opcode::NewObject,
@@ -1243,6 +1740,28 @@ impl CodeEmitter {
                     ));
                 }
             }
+            SsaOp::RecordLit(fields) => {
+                let dst = dst_reg.expect("record literal requires dst");
+                instructions.push(Instruction::new(
+                    Opcode::NewObject,
+                    vec![OperandType::Register(dst)],
+                ));
+                for (field, val_id) in fields {
+                    let value = if let Some(lit) = const_values.get(val_id) {
+                        OperandType::Constant(lit_to_value(lit))
+                    } else {
+                        OperandType::Register(regalloc.get(*val_id))
+                    };
+                    instructions.push(Instruction::new(
+                        Opcode::SetProp,
+                        vec![
+                            OperandType::Register(dst),
+                            OperandType::Property(field.clone()),
+                            value,
+                        ],
+                    ));
+                }
+            }
             SsaOp::Spawn { callee, args } => {
                 let dst = dst_reg.expect("spawn requires dst");
                 let callee_op = if let Some(fn_name) = global_fn_names.get(callee) {
@@ -1250,10 +1769,7 @@ impl CodeEmitter {
                 } else {
                     OperandType::Register(regalloc.get(*callee))
                 };
-                let mut operands = vec![
-                    callee_op,
-                    OperandType::Offset(args.len() as i64),
-                ];
+                let mut operands = vec![callee_op, OperandType::Offset(args.len() as i64)];
                 for a in args {
                     if let Some(lit) = const_values.get(a) {
                         operands.push(OperandType::Constant(lit_to_value(lit)));
@@ -1275,10 +1791,7 @@ impl CodeEmitter {
                 } else {
                     OperandType::Register(regalloc.get(*message))
                 };
-                instructions.push(Instruction::new(
-                    Opcode::Send,
-                    vec![r_op, m_op],
-                ));
+                instructions.push(Instruction::new(Opcode::Send, vec![r_op, m_op]));
             }
             SsaOp::Receive => {
                 let dst = dst_reg.expect("receive requires dst");
@@ -1305,11 +1818,20 @@ impl CodeEmitter {
                         StringPartValue::Value(v) => {
                             if let Some(lit) = const_values.get(v) {
                                 match lit {
-                                    LitVal::String(s) => operands.push(OperandType::Constant(Value::String(s.clone()))),
-                                    LitVal::Int(i) => operands.push(OperandType::Constant(Value::Int(*i))),
-                                    LitVal::Float(f) => operands.push(OperandType::Constant(Value::Float(*f))),
-                                    LitVal::Bool(b) => operands.push(OperandType::Constant(Value::Bool(*b))),
-                                    LitVal::Unit | LitVal::Nil => operands.push(OperandType::Constant(Value::Nil)),
+                                    LitVal::String(s) => operands
+                                        .push(OperandType::Constant(Value::String(s.clone()))),
+                                    LitVal::Int(i) => {
+                                        operands.push(OperandType::Constant(Value::Int(*i)))
+                                    }
+                                    LitVal::Float(f) => {
+                                        operands.push(OperandType::Constant(Value::Float(*f)))
+                                    }
+                                    LitVal::Bool(b) => {
+                                        operands.push(OperandType::Constant(Value::Bool(*b)))
+                                    }
+                                    LitVal::Unit | LitVal::Nil => {
+                                        operands.push(OperandType::Constant(Value::Nil))
+                                    }
                                 }
                             } else {
                                 operands.push(OperandType::Register(regalloc.get(*v)));
@@ -1365,15 +1887,52 @@ impl CodeEmitter {
                 };
                 Pattern::Literal(val)
             }
-            PatternNode::Tuple(elems, _) => {
-                Pattern::Tuple(
-                    elems
-                        .iter()
-                        .map(|elem| self.lower_pattern(elem, regalloc, binding_regs))
-                        .collect(),
-                )
+            PatternNode::Struct { name, fields, .. } => {
+                let mut properties = Vec::new();
+                if let Some(name) = name {
+                    let compiled_name = self
+                        .type_prototypes
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_else(|| name.clone());
+                    properties.push((
+                        "@".to_string(),
+                        Pattern::Literal(Value::String(compiled_name)),
+                    ));
+                }
+                for structpattern in fields {
+                    match structpattern {
+                        StructPatternNode::Shorthand { key, .. } => {
+                            let reg = binding_regs.get(key).expect(
+                                "struct pattern shorthand binding must have an allocated register",
+                            );
+                            properties.push((key.clone(), Pattern::Bind(*reg)));
+                        }
+                        StructPatternNode::KeyValue {
+                            key,
+                            value: pattern_node,
+                            ..
+                        } => {
+                            let pattern = self.lower_pattern(&pattern_node, regalloc, binding_regs);
+                            properties.push((key.clone(), pattern));
+                        }
+                    }
+                }
+
+                Pattern::Object(properties)
             }
-            PatternNode::Range { start, end, inclusive, .. } => {
+            PatternNode::Tuple(elems, _) => Pattern::Tuple(
+                elems
+                    .iter()
+                    .map(|elem| self.lower_pattern(elem, regalloc, binding_regs))
+                    .collect(),
+            ),
+            PatternNode::Range {
+                start,
+                end,
+                inclusive,
+                ..
+            } => {
                 let start_val = start.as_ref().and_then(|e| match e.as_ref() {
                     crate::syntax::cst::Expr::Literal(LitVal::Int(i), _) => Some(*i),
                     _ => None,
@@ -1424,7 +1983,23 @@ impl CodeEmitter {
                     );
                 }
                 let clean_name = name.strip_prefix(':').unwrap_or(name);
-                Pattern::Literal(Value::String(clean_name.to_string()))
+                let mut properties = vec![(
+                    "@@".to_string(),
+                    Pattern::Literal(Value::String(clean_name.to_string())),
+                )];
+                if let Some(enum_name) = self.enum_variants.get(clean_name) {
+                    properties.push((
+                        "@".to_string(),
+                        Pattern::Literal(Value::String(enum_name.clone())),
+                    ));
+                }
+                properties.extend(args.iter().enumerate().map(|(index, arg)| {
+                    (
+                        format!("@payload_{}", index),
+                        self.lower_pattern(arg, regalloc, binding_regs),
+                    )
+                }));
+                Pattern::Object(properties)
             }
         }
     }
@@ -1433,10 +2008,36 @@ impl CodeEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::syntax::parse;
-    use crate::sema::resolve;
     use crate::mir::build_ssa_program;
+    use crate::sema::resolve;
+    use crate::syntax::parse;
     use vmm::vm::IonVM;
+
+    #[test]
+    fn string_addition_uses_string_concat_opcode() {
+        let src = r#"
+        fn process_data(tag: String) -> String:
+            return "[RESULT]" + tag
+        "#;
+        let module = parse(src).expect("parsed");
+        let resolved = resolve(&module).expect("resolved");
+        let ssa = build_ssa_program(&resolved, &module);
+        let mut inferrer = crate::TypeInferrer::new();
+        let types = inferrer.infer_program(&ssa).expect("types inferred");
+        let bytecode = CodeEmitter::emit_program_with_types(&ssa, Some(&types));
+        let function = bytecode
+            .functions
+            .iter()
+            .find(|function| function.name.ends_with("process_data"))
+            .expect("process_data emitted");
+
+        assert!(
+            function
+                .instructions
+                .iter()
+                .any(|instruction| instruction.opcode == Opcode::SConcatRRR)
+        );
+    }
 
     #[test]
     fn test_struct_constructor_uses_shared_prototype_and_compiled_methods() {
@@ -1481,6 +2082,17 @@ mod tests {
                 .expect("Point load-time prototype emitted");
             assert_eq!(prototype_name, "<memory>.Point");
             let prototype = prototype.read().unwrap();
+            assert_eq!(
+                prototype.get_property("@"),
+                Some(Value::String("<memory>.Point".to_string()))
+            );
+            assert_eq!(
+                prototype
+                    .properties
+                    .get("@")
+                    .map(|property| property.protection),
+                Some(Protection::Readonly)
+            );
             assert_eq!(prototype.get_property("x"), Some(Value::Nil));
             match prototype.get_property("describe") {
                 Some(Value::Function(function)) => {
@@ -1514,6 +2126,210 @@ mod tests {
     }
 
     #[test]
+    fn test_type_names_as_values_load_type_prototypes() {
+        let src = r#"
+        struct Point:
+            x: Int
+
+        fn main():
+            let point_type = Point
+            let option_type = Option
+            println(point_type)
+            option_type
+        "#;
+        let bytecode = crate::compile(src).expect("program compiles");
+        let main = bytecode
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .expect("main function emitted");
+        let type_operands: Vec<_> = main
+            .instructions
+            .iter()
+            .filter_map(|instruction| {
+                (instruction.opcode == Opcode::LoadConst)
+                    .then(|| instruction.operands.first())
+                    .flatten()
+                    .and_then(|operand| match operand {
+                        OperandType::Property(name) => Some(name.as_str()),
+                        _ => None,
+                    })
+            })
+            .collect();
+        assert!(type_operands.contains(&"<memory>.Point"));
+        assert!(type_operands.contains(&"<memory>.Option"));
+
+        let mut vm = IonVM::new(bytecode).expect("init vm");
+        vm.run().expect("run vm");
+        let Some(Value::Object(option_type)) = vm.entrypoint_return() else {
+            panic!("expected Option prototype object");
+        };
+        let option_type = option_type.read().expect("Option prototype is readable");
+        assert_eq!(
+            option_type.get_property("@"),
+            Some(Value::String("<memory>.Option".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_string_to_int_returns_result_enum_with_compiled_identity() {
+        let bytecode = crate::compile(
+            r#"
+            fn main() -> Result[Int, String]:
+                "invalid".to_int()
+            "#,
+        )
+        .expect("program compiles");
+        let mut vm = IonVM::new(bytecode).expect("initialize VM");
+        vm.run().expect("run VM");
+        let Some(Value::Object(result)) = vm.entrypoint_return() else {
+            panic!("expected Result enum");
+        };
+        let result = result.read().expect("Result object is readable");
+        assert_eq!(
+            result.get_property("@"),
+            Some(Value::String("<memory>.Result".to_string()))
+        );
+        assert_eq!(
+            result.get_property("@@"),
+            Some(Value::String("err".to_string()))
+        );
+        assert!(matches!(
+            result.get_property("@payload_0"),
+            Some(Value::String(_))
+        ));
+        assert!(result.prototype.is_some());
+
+        let bytecode = crate::compile(
+            r#"
+            fn main() -> Result[Int, String]:
+                "42".to_int()
+            "#,
+        )
+        .expect("program compiles");
+        let mut vm = IonVM::new(bytecode).expect("initialize VM");
+        vm.run().expect("run VM");
+        let Some(Value::Object(result)) = vm.entrypoint_return() else {
+            panic!("expected Result enum");
+        };
+        let result = result.read().expect("Result object is readable");
+        assert_eq!(
+            result.get_property("@@"),
+            Some(Value::String("ok".to_string()))
+        );
+        assert_eq!(result.get_property("@payload_0"), Some(Value::Int(42)));
+    }
+
+    #[test]
+    fn test_array_get_returns_option_enum_with_compiled_identity() {
+        let bytecode = crate::compile(
+            r#"
+            fn main() -> Option[Int]:
+                [10, 20].get(1)
+            "#,
+        )
+        .expect("program compiles");
+        let mut vm = IonVM::new(bytecode).expect("initialize VM");
+        vm.run().expect("run VM");
+        let Some(Value::Object(option)) = vm.entrypoint_return() else {
+            panic!("expected Option enum");
+        };
+        let option = option.read().expect("Option object is readable");
+        assert_eq!(
+            option.get_property("@"),
+            Some(Value::String("<memory>.Option".to_string()))
+        );
+        assert_eq!(
+            option.get_property("@@"),
+            Some(Value::String("some".to_string()))
+        );
+        assert_eq!(option.get_property("@payload_0"), Some(Value::Int(20)));
+        assert!(option.prototype.is_some());
+    }
+
+    #[test]
+    fn test_array_pop_returns_some_or_none() {
+        for (source, variant, payload) in [
+            (
+                "fn main() -> Option[Int]:\n    [7].pop()",
+                "some",
+                Some(Value::Int(7)),
+            ),
+            (
+                "fn main() -> Option[Int]:\n    let values: Array[Int] = []\n    values.pop()",
+                "none",
+                None,
+            ),
+        ] {
+            let bytecode = crate::compile(source).expect("program compiles");
+            let mut vm = IonVM::new(bytecode).expect("initialize VM");
+            vm.run().expect("run VM");
+            let Some(Value::Object(option)) = vm.entrypoint_return() else {
+                panic!("expected Option enum");
+            };
+            let option = option.read().expect("Option object is readable");
+            assert_eq!(
+                option.get_property("@@"),
+                Some(Value::String(variant.to_string()))
+            );
+            assert_eq!(option.get_property("@payload_0"), payload);
+            assert_eq!(
+                option.get_property("@"),
+                Some(Value::String("<memory>.Option".to_string()))
+            );
+        }
+    }
+
+    #[test]
+    fn test_json_get_returns_none_option_for_missing_path() {
+        let bytecode = crate::compile(
+            r#"
+            fn main() -> Option[Int]:
+                json_get("{\"value\": 1}", "missing")
+            "#,
+        )
+        .expect("program compiles");
+        let mut vm = IonVM::new(bytecode).expect("initialize VM");
+        vm.run().expect("run VM");
+        let Some(Value::Object(option)) = vm.entrypoint_return() else {
+            panic!("expected Option enum");
+        };
+        let option = option.read().expect("Option object is readable");
+        assert_eq!(
+            option.get_property("@"),
+            Some(Value::String("<memory>.Option".to_string()))
+        );
+        assert_eq!(
+            option.get_property("@@"),
+            Some(Value::String("none".to_string()))
+        );
+        assert!(option.prototype.is_some());
+    }
+
+    #[test]
+    fn test_json_get_returns_some_option_for_present_path() {
+        let bytecode = crate::compile(
+            r#"
+            fn main() -> Option[Int]:
+                json_get("{\"value\": 42}", "value")
+            "#,
+        )
+        .expect("program compiles");
+        let mut vm = IonVM::new(bytecode).expect("initialize VM");
+        vm.run().expect("run VM");
+        let Some(Value::Object(option)) = vm.entrypoint_return() else {
+            panic!("expected Option enum");
+        };
+        let option = option.read().expect("Option object is readable");
+        assert_eq!(
+            option.get_property("@@"),
+            Some(Value::String("some".to_string()))
+        );
+        assert_eq!(option.get_property("@payload_0"), Some(Value::Int(42)));
+        assert!(option.prototype.is_some());
+    }
+
+    #[test]
     fn test_struct_constructor_pattern_destructures_fields() {
         let src = r#"
         struct Point:
@@ -1533,6 +2349,162 @@ mod tests {
             vm.entrypoint_return(),
             Some(Value::String("Point x=40, y=2".to_string()))
         );
+    }
+
+    #[test]
+    fn test_struct_pattern_matches_exact_compiled_name() {
+        let src = r#"
+        struct Point:
+            x: Int
+            y: Int
+
+        struct Vec2:
+            x: Int
+            y: Int
+
+        fn main() -> String:
+            let point = Point(10, 20)
+            return match point:
+                Vec2(x, y) => "vec"
+                Point(x, y) => "point"
+                _ => "other"
+        "#;
+        let bytecode = crate::compile(src).expect("compile struct pattern");
+        let mut vm = IonVM::new(bytecode).expect("initialize VM");
+        vm.run().expect("run VM");
+        assert_eq!(
+            vm.entrypoint_return(),
+            Some(Value::String("point".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_record_literal_and_field_access() {
+        let src = r#"
+        fn main() -> Int:
+            let r = (x: 10, y: 20)
+            return r.x + r.y
+        "#;
+        let bytecode = crate::compile(src).expect("compile record literal and access");
+        let mut vm = IonVM::new(bytecode).expect("initialize VM");
+        vm.run().expect("run VM");
+        assert_eq!(vm.entrypoint_return(), Some(Value::Int(30)));
+    }
+
+    #[test]
+    fn test_record_shorthand_syntax() {
+        let src = r#"
+        fn main() -> Int:
+            let x = 10
+            let r = (x:, y: 20)
+            return r.x + r.y
+        "#;
+        let bytecode = crate::compile(src).expect("compile record shorthand");
+        let mut vm = IonVM::new(bytecode).expect("initialize VM");
+        vm.run().expect("run VM");
+        assert_eq!(vm.entrypoint_return(), Some(Value::Int(30)));
+    }
+
+    #[test]
+    fn test_record_pattern_matching() {
+        let src = r#"
+        fn main() -> Int:
+            let r = (x: 10, y: 20)
+            return match r:
+                (x: a, y: b) => a + b
+                _ => 0
+        "#;
+        let bytecode = crate::compile(src).expect("compile record pattern match");
+        let mut vm = IonVM::new(bytecode).expect("initialize VM");
+        vm.run().expect("run VM");
+        assert_eq!(vm.entrypoint_return(), Some(Value::Int(30)));
+    }
+
+    #[test]
+    fn test_record_pattern_shorthand_and_structural_struct_match() {
+        let src = r#"
+        struct Point:
+            x: Int
+            y: Int
+
+        fn main() -> Int:
+            let p = Point(100, 200)
+            return match p:
+                (x:, y:) => x + y
+                _ => 0
+        "#;
+        let bytecode = crate::compile(src).expect("compile structural record match on struct");
+        let mut vm = IonVM::new(bytecode).expect("initialize VM");
+        vm.run().expect("run VM");
+        assert_eq!(vm.entrypoint_return(), Some(Value::Int(300)));
+    }
+
+    #[test]
+    fn test_struct_pattern_does_not_match_anonymous_record() {
+        let src = r#"
+        struct Point:
+            x: Int
+            y: Int
+
+        fn main() -> String:
+            let r = (x: 10, y: 20)
+            return match r:
+                Point(x, y) => "struct"
+                (x:, y:) => "record"
+                _ => "other"
+        "#;
+        let bytecode = crate::compile(src).expect("compile struct vs record match");
+        let mut vm = IonVM::new(bytecode).expect("initialize VM");
+        vm.run().expect("run VM");
+        assert_eq!(
+            vm.entrypoint_return(),
+            Some(Value::String("record".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_tuple_pattern_vs_record_shorthand_pattern() {
+        let src = r#"
+        fn main() -> String:
+            let pair = (1, 2)
+            let result = match pair:
+                (x, y) => "tuple: ${x}, ${y}"
+                _ => "other"
+            return result
+        "#;
+        let bytecode = crate::compile(src).expect("compile tuple pattern");
+        let mut vm = IonVM::new(bytecode).expect("initialize VM");
+        vm.run().expect("run VM");
+        assert_eq!(
+            vm.entrypoint_return(),
+            Some(Value::String("tuple: 1, 2".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_named_struct_supports_both_positional_and_colon_shorthand() {
+        let src = r#"
+        struct Point:
+            x: Int
+            y: Int
+
+        fn main() -> Int:
+            let p1 = Point(10, 20)
+            let sum1 = match p1:
+                Point(x, y) => x + y
+                _ => 0
+
+            let p2 = Point(30, 40)
+            let sum2 = match p2:
+                Point(x:, y:) => x + y
+                _ => 0
+
+            return sum1 + sum2
+        "#;
+        let bytecode = crate::compile(src).expect("compile named struct pattern variants");
+        let mut vm = IonVM::new(bytecode).expect("initialize VM");
+        vm.run().expect("run VM");
+        assert_eq!(vm.entrypoint_return(), Some(Value::Int(100)));
     }
 
     #[test]
@@ -1762,7 +2734,10 @@ mod tests {
             let r = arr.read().unwrap();
             assert_eq!(&*r, &[11.0, 22.0, 33.0, 44.0]);
         } else {
-            panic!("Expected FloatArray return, got {:?}", vm.entrypoint_return());
+            panic!(
+                "Expected FloatArray return, got {:?}",
+                vm.entrypoint_return()
+            );
         }
     }
 
@@ -1841,6 +2816,272 @@ mod tests {
         let mut vm = IonVM::new(bytecode).expect("init vm");
         vm.run().expect("run vm");
         assert_eq!(vm.entrypoint_return(), Some(Value::Int(30)));
+    }
+
+    #[test]
+    fn test_codegen_and_run_implicit_tail_returns() {
+        let src = r#"
+        fn make_counter(start: Int):
+            let x = start
+            fn() -> Int:
+                x = x + 1
+                x
+
+        fn main() -> Int:
+            let counter = make_counter(19)
+            counter()
+        "#;
+        let module = parse(src).expect("parsed");
+        let resolved = resolve(&module).expect("resolved");
+        let ssa = build_ssa_program(&resolved, &module);
+        let mut inferrer = crate::TypeInferrer::new();
+        inferrer.register_module_declarations(&module);
+        let type_maps = inferrer.infer_program(&ssa).expect("types inferred");
+        let bytecode = CodeEmitter::emit_program_with_types(&ssa, Some(&type_maps));
+
+        let mut vm = IonVM::new(bytecode).expect("init vm");
+        vm.run().expect("run vm");
+        assert_eq!(vm.entrypoint_return(), Some(Value::Int(20)));
+    }
+
+    #[test]
+    fn test_codegen_and_run_nested_returned_closure() {
+        let src = r#"
+        fn main() -> Float:
+            let make_multiplier = fn(factor: Float):
+                fn(value: Float) -> Float:
+                    value * factor
+            let multiply = make_multiplier(2.2)
+            multiply(10.1)
+        "#;
+        let bytecode = crate::compile(src).expect("program compiles");
+        let inner_lambda = bytecode
+            .functions
+            .iter()
+            .find(|function| {
+                function.instructions.iter().any(|instruction| {
+                    instruction
+                        .operands
+                        .iter()
+                        .any(|operand| matches!(operand, OperandType::Captured(0)))
+                })
+            })
+            .expect("nested lambda exists");
+        assert!(
+            inner_lambda
+                .instructions
+                .iter()
+                .any(|instruction| instruction.opcode == Opcode::FMulRRR)
+        );
+        let outer_lambda = bytecode
+            .functions
+            .iter()
+            .find(|function| {
+                function
+                    .instructions
+                    .iter()
+                    .any(|instruction| instruction.opcode == Opcode::MakeClosure)
+            })
+            .expect("outer lambda creates a closure");
+
+        assert!(
+            outer_lambda
+                .instructions
+                .iter()
+                .any(|instruction| { instruction.opcode == Opcode::MakeClosure })
+        );
+        let mut vm = IonVM::new(bytecode).expect("init vm");
+        vm.run().expect("run vm");
+        let Some(Value::Float(result)) = vm.entrypoint_return() else {
+            panic!("expected floating-point result");
+        };
+        assert!((result - 22.22).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_codegen_and_run_tagged_enum_constructors_and_match() {
+        let src = r#"
+        enum Shape:
+            Circle(Float)
+            Rect(Float, Float)
+            Point
+
+        fn area(shape: Shape) -> Result[Float, String]:
+            match shape:
+                :Circle(radius) => :ok(radius * radius)
+                :Rect(width, height) => :ok(width * height)
+                _ => :err("unsupported")
+
+        fn main() -> Result[Float, String]:
+            area(:Circle(3.5))
+        "#;
+        let bytecode = crate::compile(src).expect("program compiles");
+        let mut vm = IonVM::new(bytecode).expect("init vm");
+        vm.run().expect("run vm");
+        let Some(Value::Object(result)) = vm.entrypoint_return() else {
+            panic!("expected enum object");
+        };
+        let result = result.read().expect("enum object is readable");
+        assert_eq!(
+            result.get_property("@"),
+            Some(Value::String("<memory>.Result".to_string()))
+        );
+        assert_eq!(
+            result
+                .properties
+                .get("@")
+                .map(|property| property.protection),
+            Some(Protection::Readonly)
+        );
+        assert_eq!(
+            result.get_property("@@"),
+            Some(Value::String("ok".to_string()))
+        );
+        assert_eq!(
+            result
+                .properties
+                .get("@@")
+                .map(|property| property.protection),
+            Some(Protection::Readonly)
+        );
+        assert_eq!(result.get_property("@payload_0"), Some(Value::Float(12.25)));
+    }
+
+    #[test]
+    fn test_enum_methods_are_registered_in_load_time_prototype() {
+        let src = r#"
+        enum Shape:
+            Circle(Float)
+
+        impl ToString for Shape:
+            fn to_string() -> String:
+                return match self:
+                    :Circle(radius) => "Circle(radius=${radius})"
+
+        fn main() -> String:
+            return :Circle(3.5).to_string()
+        "#;
+        let bytecode = crate::compile(src).expect("program compiles");
+        let (_, prototype) = bytecode
+            .object_inits
+            .iter()
+            .find(|(name, _)| name == "<memory>.Shape")
+            .expect("Shape load-time prototype emitted");
+        {
+            let prototype = prototype.read().unwrap();
+            assert_eq!(
+                prototype.get_property("@"),
+                Some(Value::String("<memory>.Shape".to_string()))
+            );
+            assert_eq!(
+                prototype
+                    .properties
+                    .get("@")
+                    .map(|property| property.protection),
+                Some(Protection::Readonly)
+            );
+            assert_eq!(prototype.get_property("@@"), None);
+        }
+        match prototype.read().unwrap().get_property("to_string") {
+            Some(Value::Function(function)) => {
+                assert_eq!(
+                    function.read().unwrap().name,
+                    "<memory>.Shape.#ToString.to_string"
+                );
+            }
+            other => panic!("expected enum ToString method in prototype, got {other:?}"),
+        }
+
+        let mut vm = IonVM::new(bytecode).expect("init vm");
+        vm.run().expect("run vm");
+        assert_eq!(
+            vm.entrypoint_return(),
+            Some(Value::String("Circle(radius=3.5)".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_prelude_result_generic_methods() {
+        let src = r#"
+        fn increment(value: Int) -> Int:
+            return value + 1
+
+        fn chain(value: Int) -> Result[Int, String]:
+            return :ok(value + 1)
+
+        fn suffix(message: String) -> String:
+            return message + "!"
+
+        fn recover(message: String) -> Result[Int, String]:
+            return :ok(42)
+
+        fn main() -> Result[Int, String]:
+            let mapped = :ok(20).map(increment)
+            let mapped_text = :ok("value").map(suffix)
+            let chained = mapped.and_then(chain)
+            let mapped_error = :err("bad").map_err(suffix)
+            let recovered = mapped_error.or_else(recover)
+            let success_status = chained.is_ok()
+            let error_status = mapped_error.is_err()
+            let fallback = :err("missing").unwrap_or(24)
+            recovered
+        "#;
+        let bytecode = crate::compile(src).expect("program compiles");
+        let mut vm = IonVM::new(bytecode).expect("init vm");
+        vm.run().expect("run vm");
+        let Some(Value::Object(result)) = vm.entrypoint_return() else {
+            panic!("expected Result enum object");
+        };
+        let result = result.read().expect("Result object is readable");
+        assert_eq!(
+            result.get_property("@"),
+            Some(Value::String("<memory>.Result".to_string()))
+        );
+        assert_eq!(
+            result.get_property("@@"),
+            Some(Value::String("ok".to_string()))
+        );
+        assert_eq!(result.get_property("@payload_0"), Some(Value::Int(42)));
+    }
+
+    #[test]
+    fn test_prelude_option_generic_methods() {
+        let src = r#"
+        fn increment(value: Int) -> Int:
+            return value + 1
+
+        fn to_option(value: Int) -> Option[Int]:
+            return :some(value + 1)
+
+        fn fallback() -> Option[Int]:
+            return :some(40)
+
+        fn main() -> Option[Int]:
+            let mapped = :some(20).map(increment)
+            let chained = mapped.and_then(to_option)
+            let absent = :none
+            let is_absent = absent.is_none()
+            let is_present = chained.is_some()
+            let value = :none.unwrap_or(7)
+            let recovered = absent.or_else(fallback)
+            recovered
+        "#;
+        let bytecode = crate::compile(src).expect("program compiles");
+        let mut vm = IonVM::new(bytecode).expect("init vm");
+        vm.run().expect("run vm");
+        let Some(Value::Object(option)) = vm.entrypoint_return() else {
+            panic!("expected Option enum object");
+        };
+        let option = option.read().expect("Option object is readable");
+        assert_eq!(
+            option.get_property("@"),
+            Some(Value::String("<memory>.Option".to_string()))
+        );
+        assert_eq!(
+            option.get_property("@@"),
+            Some(Value::String("some".to_string()))
+        );
+        assert_eq!(option.get_property("@payload_0"), Some(Value::Int(40)));
     }
 
     #[test]
@@ -1923,7 +3164,10 @@ mod tests {
 
         let mut vm = IonVM::new(bytecode).expect("init vm");
         vm.run().expect("run vm");
-        assert_eq!(vm.entrypoint_return(), Some(Value::String("hello world mesh".to_string())));
+        assert_eq!(
+            vm.entrypoint_return(),
+            Some(Value::String("hello world mesh".to_string()))
+        );
     }
 
     #[test]

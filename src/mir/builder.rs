@@ -56,12 +56,7 @@ impl<'a> SsaBuilder<'a> {
             .find(|function| function.name == func_def.name && function.span == func_def.span)
             .map(|function| function.compiled_name.clone())
             .unwrap_or_else(|| func_def.name.clone());
-        Self::build_function_with_compiled_name(
-            resolved,
-            func_def,
-            compiled_name,
-            out_functions,
-        )
+        Self::build_function_with_compiled_name(resolved, func_def, compiled_name, out_functions)
     }
 
     fn build_function_with_compiled_name(
@@ -79,27 +74,36 @@ impl<'a> SsaBuilder<'a> {
 
         // Bind function parameters
         for param in &func_def.params {
-            let val = builder.current_func.new_value(Some(param.name.clone()), param.span);
-            builder.current_func.params.push((param.name.clone(), val, param.type_ann.clone()));
+            let val = builder
+                .current_func
+                .new_value(Some(param.name.clone()), param.span);
+            builder
+                .current_func
+                .params
+                .push((param.name.clone(), val, param.type_ann.clone()));
             builder.set_var(&param.name, val);
         }
 
         // Lower function body
-        builder.lower_block(&func_def.body);
+        let return_value = builder.lower_block(&func_def.body);
 
         // Ensure current block has a terminator
-        if !builder.current_func.block(builder.current_bb).is_terminated() {
-            builder.current_func.block_mut(builder.current_bb).terminator = SsaTerminator::Return(None, func_def.span);
+        if !builder
+            .current_func
+            .block(builder.current_bb)
+            .is_terminated()
+        {
+            builder
+                .current_func
+                .block_mut(builder.current_bb)
+                .terminator = SsaTerminator::Return(return_value, func_def.body.span);
         }
 
         out_functions.extend(builder.nested_functions);
         builder.current_func
     }
 
-    pub fn build_function(
-        resolved: &'a ResolvedProgram,
-        func_def: &FnDef,
-    ) -> SsaFunction {
+    pub fn build_function(resolved: &'a ResolvedProgram, func_def: &FnDef) -> SsaFunction {
         let mut extra = Vec::new();
         Self::build_function_with_nested(resolved, func_def, &mut extra)
     }
@@ -125,20 +129,26 @@ impl<'a> SsaBuilder<'a> {
 
     fn emit_inst(&mut self, op: SsaOp, name: Option<String>, span: Span) -> ValueId {
         let dst = self.current_func.new_value(name, span);
-        self.current_func.block_mut(self.current_bb).instructions.push(SsaInst {
-            dst: Some(dst),
-            op,
-            span,
-        });
+        self.current_func
+            .block_mut(self.current_bb)
+            .instructions
+            .push(SsaInst {
+                dst: Some(dst),
+                op,
+                span,
+            });
         dst
     }
 
     fn emit_void_inst(&mut self, op: SsaOp, span: Span) {
-        self.current_func.block_mut(self.current_bb).instructions.push(SsaInst {
-            dst: None,
-            op,
-            span,
-        });
+        self.current_func
+            .block_mut(self.current_bb)
+            .instructions
+            .push(SsaInst {
+                dst: None,
+                op,
+                span,
+            });
     }
 
     pub fn lower_block(&mut self, block: &Block) -> Option<ValueId> {
@@ -172,8 +182,16 @@ impl<'a> SsaBuilder<'a> {
                 let rhs_val = self.lower_expr(val);
                 match target {
                     Expr::Ident(name, target_span) => {
-                        if let Some(ResolvedVar::Upvalue { upvalue_index, .. }) = self.resolved.var_resolutions.get(target_span) {
-                            self.emit_void_inst(SsaOp::StoreUpvalue { index: *upvalue_index, val: rhs_val }, *span);
+                        if let Some(ResolvedVar::Upvalue { upvalue_index, .. }) =
+                            self.resolved.var_resolutions.get(target_span)
+                        {
+                            self.emit_void_inst(
+                                SsaOp::StoreUpvalue {
+                                    index: *upvalue_index,
+                                    val: rhs_val,
+                                },
+                                *span,
+                            );
                         }
                         self.set_var(name, rhs_val);
                     }
@@ -203,14 +221,31 @@ impl<'a> SsaBuilder<'a> {
                     _ => {}
                 }
             }
-            Stmt::AugAssign { target, op, val, span } => {
+            Stmt::AugAssign {
+                target,
+                op,
+                val,
+                span,
+            } => {
                 let rhs_val = self.lower_expr(val);
                 match target {
                     Expr::Ident(name, target_span) => {
                         let old_val = self.lower_expr(&Expr::Ident(name.clone(), *target_span));
-                        let new_val = self.emit_inst(SsaOp::Binary(*op, old_val, rhs_val), Some(name.clone()), *span);
-                        if let Some(ResolvedVar::Upvalue { upvalue_index, .. }) = self.resolved.var_resolutions.get(target_span) {
-                            self.emit_void_inst(SsaOp::StoreUpvalue { index: *upvalue_index, val: new_val }, *span);
+                        let new_val = self.emit_inst(
+                            SsaOp::Binary(*op, old_val, rhs_val),
+                            Some(name.clone()),
+                            *span,
+                        );
+                        if let Some(ResolvedVar::Upvalue { upvalue_index, .. }) =
+                            self.resolved.var_resolutions.get(target_span)
+                        {
+                            self.emit_void_inst(
+                                SsaOp::StoreUpvalue {
+                                    index: *upvalue_index,
+                                    val: new_val,
+                                },
+                                *span,
+                            );
                         }
                         self.set_var(name, new_val);
                     }
@@ -224,8 +259,12 @@ impl<'a> SsaBuilder<'a> {
                 let exit_bb = self.new_block("while_exit");
 
                 // Jump from pre-loop to header
-                self.current_func.block_mut(pre_loop_bb).terminator = SsaTerminator::Goto(header_bb, *span);
-                self.current_func.block_mut(header_bb).predecessors.push(pre_loop_bb);
+                self.current_func.block_mut(pre_loop_bb).terminator =
+                    SsaTerminator::Goto(header_bb, *span);
+                self.current_func
+                    .block_mut(header_bb)
+                    .predecessors
+                    .push(pre_loop_bb);
 
                 // Find variables potentially modified in while body
                 let modified_vars = self.collect_assigned_vars_in_block(body);
@@ -255,27 +294,44 @@ impl<'a> SsaBuilder<'a> {
                     else_bb: exit_bb,
                     span: *span,
                 };
-                self.current_func.block_mut(body_bb).predecessors.push(header_bb);
-                self.current_func.block_mut(exit_bb).predecessors.push(header_bb);
+                self.current_func
+                    .block_mut(body_bb)
+                    .predecessors
+                    .push(header_bb);
+                self.current_func
+                    .block_mut(exit_bb)
+                    .predecessors
+                    .push(header_bb);
 
                 // Lower loop body in body_bb
                 self.current_bb = body_bb;
                 let body_init_defs = self.var_defs[&header_bb].clone();
                 self.var_defs.insert(body_bb, body_init_defs);
 
-                self.loop_stack.push(LoopCtx { header_bb, exit_bb, break_bbs: Vec::new() });
+                self.loop_stack.push(LoopCtx {
+                    header_bb,
+                    exit_bb,
+                    break_bbs: Vec::new(),
+                });
                 self.lower_block(body);
                 let _loop_ctx = self.loop_stack.pop().unwrap();
 
                 let body_end_bb = self.current_bb;
                 if !self.current_func.block(body_end_bb).is_terminated() {
-                    self.current_func.block_mut(body_end_bb).terminator = SsaTerminator::Goto(header_bb, *span);
-                    self.current_func.block_mut(header_bb).predecessors.push(body_end_bb);
+                    self.current_func.block_mut(body_end_bb).terminator =
+                        SsaTerminator::Goto(header_bb, *span);
+                    self.current_func
+                        .block_mut(header_bb)
+                        .predecessors
+                        .push(body_end_bb);
                 }
 
                 // Complete the phis in header_bb with back-edge values
                 for (var_name, (phi_dst, pre_val)) in phi_placeholders {
-                    let back_val = self.var_defs[&body_end_bb].get(&var_name).copied().unwrap_or(pre_val);
+                    let back_val = self.var_defs[&body_end_bb]
+                        .get(&var_name)
+                        .copied()
+                        .unwrap_or(pre_val);
                     self.current_func.block_mut(header_bb).phis.push(Phi {
                         dst: phi_dst,
                         incoming: vec![(pre_loop_bb, pre_val), (body_end_bb, back_val)],
@@ -293,20 +349,32 @@ impl<'a> SsaBuilder<'a> {
                 let body_bb = self.new_block("loop_body");
                 let exit_bb = self.new_block("loop_exit");
 
-                self.current_func.block_mut(pre_loop_bb).terminator = SsaTerminator::Goto(body_bb, *span);
-                self.current_func.block_mut(body_bb).predecessors.push(pre_loop_bb);
+                self.current_func.block_mut(pre_loop_bb).terminator =
+                    SsaTerminator::Goto(body_bb, *span);
+                self.current_func
+                    .block_mut(body_bb)
+                    .predecessors
+                    .push(pre_loop_bb);
 
                 self.current_bb = body_bb;
                 let body_defs = self.var_defs[&pre_loop_bb].clone();
                 self.var_defs.insert(body_bb, body_defs);
 
-                self.loop_stack.push(LoopCtx { header_bb: body_bb, exit_bb, break_bbs: Vec::new() });
+                self.loop_stack.push(LoopCtx {
+                    header_bb: body_bb,
+                    exit_bb,
+                    break_bbs: Vec::new(),
+                });
                 self.lower_block(body);
                 let _loop_ctx = self.loop_stack.pop().unwrap();
 
                 if !self.current_func.block(self.current_bb).is_terminated() {
-                    self.current_func.block_mut(self.current_bb).terminator = SsaTerminator::Goto(body_bb, *span);
-                    self.current_func.block_mut(body_bb).predecessors.push(self.current_bb);
+                    self.current_func.block_mut(self.current_bb).terminator =
+                        SsaTerminator::Goto(body_bb, *span);
+                    self.current_func
+                        .block_mut(body_bb)
+                        .predecessors
+                        .push(self.current_bb);
                 }
 
                 self.current_bb = exit_bb;
@@ -316,23 +384,29 @@ impl<'a> SsaBuilder<'a> {
                     let exit_bb = ctx.exit_bb;
                     let break_bb = self.current_bb;
                     ctx.break_bbs.push(break_bb);
-                    self.current_func.block_mut(break_bb).terminator = SsaTerminator::Goto(exit_bb, *span);
-                    self.current_func.block_mut(exit_bb).predecessors.push(break_bb);
-                    self.current_bb = self.new_block("dead");
+                    self.current_func.block_mut(break_bb).terminator =
+                        SsaTerminator::Goto(exit_bb, *span);
+                    self.current_func
+                        .block_mut(exit_bb)
+                        .predecessors
+                        .push(break_bb);
                 }
             }
             Stmt::Continue(span) => {
                 if let Some(ctx) = self.loop_stack.last() {
                     let header_bb = ctx.header_bb;
-                    self.current_func.block_mut(self.current_bb).terminator = SsaTerminator::Goto(header_bb, *span);
-                    self.current_func.block_mut(header_bb).predecessors.push(self.current_bb);
-                    self.current_bb = self.new_block("dead");
+                    self.current_func.block_mut(self.current_bb).terminator =
+                        SsaTerminator::Goto(header_bb, *span);
+                    self.current_func
+                        .block_mut(header_bb)
+                        .predecessors
+                        .push(self.current_bb);
                 }
             }
             Stmt::Return { val, span } => {
                 let ret_val = val.as_ref().map(|v| self.lower_expr(v));
-                self.current_func.block_mut(self.current_bb).terminator = SsaTerminator::Return(ret_val, *span);
-                self.current_bb = self.new_block("dead");
+                self.current_func.block_mut(self.current_bb).terminator =
+                    SsaTerminator::Return(ret_val, *span);
             }
             Stmt::Expr(e) => {
                 self.lower_expr(e);
@@ -364,6 +438,12 @@ impl<'a> SsaBuilder<'a> {
                 self.emit_inst(SsaOp::BuildString(part_vals), None, span)
             }
             Expr::Ident(name, _) => {
+                if matches!(
+                    self.resolved.var_resolutions.get(&span),
+                    Some(ResolvedVar::This { .. })
+                ) {
+                    return self.emit_inst(SsaOp::This, Some(name.clone()), span);
+                }
                 if let Some(val) = self.get_var(name) {
                     val
                 } else if let Some(lit) = self.resolved.top_level_consts.get(name) {
@@ -381,10 +461,14 @@ impl<'a> SsaBuilder<'a> {
                         ResolvedVar::This { .. } => {
                             self.emit_inst(SsaOp::This, Some(name.clone()), span)
                         }
-                        ResolvedVar::EnumVariant { variant_name, .. } => {
-                            self.emit_inst(SsaOp::Atom(variant_name.clone()), Some(variant_name.clone()), span)
+                        ResolvedVar::EnumVariant { variant_name, .. } => self.emit_inst(
+                            SsaOp::Atom(variant_name.clone()),
+                            Some(variant_name.clone()),
+                            span,
+                        ),
+                        _ => {
+                            self.emit_inst(SsaOp::GlobalRef(name.clone()), Some(name.clone()), span)
                         }
-                        _ => self.emit_inst(SsaOp::GlobalRef(name.clone()), Some(name.clone()), span),
                     }
                 } else {
                     self.emit_inst(SsaOp::GlobalRef(name.clone()), Some(name.clone()), span)
@@ -392,9 +476,31 @@ impl<'a> SsaBuilder<'a> {
             }
             Expr::Atom(name, _) => {
                 let raw_name = name.strip_prefix(':').unwrap_or(name);
-                self.emit_inst(SsaOp::Atom(raw_name.to_string()), Some(raw_name.to_string()), span)
+                if let Some(ResolvedVar::EnumVariant {
+                    enum_name: Some(enum_name),
+                    variant_name,
+                    ..
+                }) = self.resolved.var_resolutions.get(&span)
+                {
+                    return self.emit_inst(
+                        SsaOp::MakeEnum {
+                            enum_name: enum_name.clone(),
+                            variant_name: variant_name.clone(),
+                            args: Vec::new(),
+                        },
+                        Some(format!("{}::{}", enum_name, variant_name)),
+                        span,
+                    );
+                }
+                self.emit_inst(
+                    SsaOp::Atom(raw_name.to_string()),
+                    Some(raw_name.to_string()),
+                    span,
+                )
             }
-            Expr::Binary { op, left, right, .. } => {
+            Expr::Binary {
+                op, left, right, ..
+            } => {
                 let l_val = self.lower_expr(left);
                 let r_val = self.lower_expr(right);
                 if let (Some(l_lit), Some(r_lit)) = (
@@ -421,11 +527,36 @@ impl<'a> SsaBuilder<'a> {
                 self.emit_inst(SsaOp::Unary(*op, val), None, span)
             }
             Expr::Call { callee, args, .. } => {
+                if let Expr::Atom(_, variant_span) = callee.as_ref() {
+                    if let Some(ResolvedVar::EnumVariant {
+                        enum_name: Some(enum_name),
+                        variant_name,
+                        ..
+                    }) = self.resolved.var_resolutions.get(variant_span)
+                    {
+                        let arg_vals: Vec<ValueId> =
+                            args.iter().map(|arg| self.lower_expr(arg)).collect();
+                        return self.emit_inst(
+                            SsaOp::MakeEnum {
+                                enum_name: enum_name.clone(),
+                                variant_name: variant_name.clone(),
+                                args: arg_vals,
+                            },
+                            Some(format!("{}::{}", enum_name, variant_name)),
+                            span,
+                        );
+                    }
+                }
                 if let Expr::Ident(_, callee_span) = callee.as_ref() {
                     if let Some(ResolvedVar::Global { name, .. }) =
                         self.resolved.var_resolutions.get(callee_span)
                     {
-                        if let Some(struct_def) = self.resolved.structs.iter().find(|s| s.compiled_name == *name) {
+                        if let Some(struct_def) = self
+                            .resolved
+                            .structs
+                            .iter()
+                            .find(|s| s.compiled_name == *name)
+                        {
                             let arg_vals: Vec<ValueId> =
                                 args.iter().map(|arg| self.lower_expr(arg)).collect();
                             return self.emit_inst(
@@ -447,20 +578,47 @@ impl<'a> SsaBuilder<'a> {
                 }
                 let callee_val = self.lower_expr(callee);
                 let arg_vals: Vec<ValueId> = args.iter().map(|a| self.lower_expr(a)).collect();
-                self.emit_inst(SsaOp::Call { callee: callee_val, args: arg_vals }, None, span)
+                self.emit_inst(
+                    SsaOp::Call {
+                        callee: callee_val,
+                        args: arg_vals,
+                    },
+                    None,
+                    span,
+                )
             }
             Expr::FieldAccess { base, field, .. } => {
-                if let Some(ResolvedVar::QualifiedGlobal { path, .. }) = self.resolved.var_resolutions.get(&span) {
-                    self.emit_inst(SsaOp::QualifiedGlobal(path.clone()), Some(field.clone()), span)
+                if let Some(ResolvedVar::QualifiedGlobal { path, .. }) =
+                    self.resolved.var_resolutions.get(&span)
+                {
+                    self.emit_inst(
+                        SsaOp::QualifiedGlobal(path.clone()),
+                        Some(field.clone()),
+                        span,
+                    )
                 } else {
                     let base_val = self.lower_expr(base);
-                    self.emit_inst(SsaOp::FieldAccess { base: base_val, field: field.clone() }, Some(field.clone()), span)
+                    self.emit_inst(
+                        SsaOp::FieldAccess {
+                            base: base_val,
+                            field: field.clone(),
+                        },
+                        Some(field.clone()),
+                        span,
+                    )
                 }
             }
             Expr::Index { base, index, .. } => {
                 let base_val = self.lower_expr(base);
                 let idx_val = self.lower_expr(index);
-                self.emit_inst(SsaOp::Index { base: base_val, index: idx_val }, None, span)
+                self.emit_inst(
+                    SsaOp::Index {
+                        base: base_val,
+                        index: idx_val,
+                    },
+                    None,
+                    span,
+                )
             }
             Expr::ArrayLit(items, _) => {
                 let item_vals: Vec<ValueId> = items.iter().map(|i| self.lower_expr(i)).collect();
@@ -470,14 +628,24 @@ impl<'a> SsaBuilder<'a> {
                 let item_vals: Vec<ValueId> = items.iter().map(|i| self.lower_expr(i)).collect();
                 self.emit_inst(SsaOp::TupleLit(item_vals), None, span)
             }
-            Expr::Block(block) => {
-                self.lower_block(block).unwrap_or_else(|| {
-                    let val = self.current_func.new_value(None, span);
-                    self.current_func.const_values.insert(val, LitVal::Unit);
-                    val
-                })
+            Expr::RecordLit(fields, _) => {
+                let field_vals: Vec<(String, ValueId)> = fields
+                    .iter()
+                    .map(|(k, v)| (k.clone(), self.lower_expr(v)))
+                    .collect();
+                self.emit_inst(SsaOp::RecordLit(field_vals), None, span)
             }
-            Expr::If { cond, then_branch, else_branch, .. } => {
+            Expr::Block(block) => self.lower_block(block).unwrap_or_else(|| {
+                let val = self.current_func.new_value(None, span);
+                self.current_func.const_values.insert(val, LitVal::Unit);
+                val
+            }),
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 let cond_val = self.lower_expr(cond);
                 let pre_if_bb = self.current_bb;
                 let then_bb = self.new_block("if_then");
@@ -490,8 +658,14 @@ impl<'a> SsaBuilder<'a> {
                     else_bb,
                     span,
                 };
-                self.current_func.block_mut(then_bb).predecessors.push(pre_if_bb);
-                self.current_func.block_mut(else_bb).predecessors.push(pre_if_bb);
+                self.current_func
+                    .block_mut(then_bb)
+                    .predecessors
+                    .push(pre_if_bb);
+                self.current_func
+                    .block_mut(else_bb)
+                    .predecessors
+                    .push(pre_if_bb);
 
                 // Lower then branch
                 self.current_bb = then_bb;
@@ -499,9 +673,14 @@ impl<'a> SsaBuilder<'a> {
                 self.var_defs.insert(then_bb, then_init_defs);
                 let then_result = self.lower_block(then_branch);
                 let then_end_bb = self.current_bb;
-                if !self.current_func.block(then_end_bb).is_terminated() {
-                    self.current_func.block_mut(then_end_bb).terminator = SsaTerminator::Goto(merge_bb, span);
-                    self.current_func.block_mut(merge_bb).predecessors.push(then_end_bb);
+                let then_reaches_merge = !self.current_func.block(then_end_bb).is_terminated();
+                if then_reaches_merge {
+                    self.current_func.block_mut(then_end_bb).terminator =
+                        SsaTerminator::Goto(merge_bb, span);
+                    self.current_func
+                        .block_mut(merge_bb)
+                        .predecessors
+                        .push(then_end_bb);
                 }
 
                 // Lower else branch
@@ -514,59 +693,103 @@ impl<'a> SsaBuilder<'a> {
                     None
                 };
                 let else_end_bb = self.current_bb;
-                if !self.current_func.block(else_end_bb).is_terminated() {
-                    self.current_func.block_mut(else_end_bb).terminator = SsaTerminator::Goto(merge_bb, span);
-                    self.current_func.block_mut(merge_bb).predecessors.push(else_end_bb);
+                let else_reaches_merge = !self.current_func.block(else_end_bb).is_terminated();
+                if else_reaches_merge {
+                    self.current_func.block_mut(else_end_bb).terminator =
+                        SsaTerminator::Goto(merge_bb, span);
+                    self.current_func
+                        .block_mut(merge_bb)
+                        .predecessors
+                        .push(else_end_bb);
                 }
 
                 // In merge_bb, insert phis for modified variables
                 let mut merge_defs = self.var_defs[&pre_if_bb].clone();
-                let all_vars: HashSet<String> = self.var_defs[&then_end_bb]
-                    .keys()
-                    .chain(self.var_defs[&else_end_bb].keys())
-                    .cloned()
+                let live_ends: Vec<BlockId> = [
+                    (then_reaches_merge, then_end_bb),
+                    (else_reaches_merge, else_end_bb),
+                ]
+                .into_iter()
+                .filter_map(|(reaches_merge, block)| reaches_merge.then_some(block))
+                .collect();
+                let all_vars: HashSet<String> = live_ends
+                    .iter()
+                    .flat_map(|block| self.var_defs[block].keys().cloned())
                     .collect();
 
                 for var_name in all_vars {
-                    let v_then = self.var_defs[&then_end_bb].get(&var_name).copied();
-                    let v_else = self.var_defs[&else_end_bb].get(&var_name).copied();
-                    match (v_then, v_else) {
-                        (Some(vt), Some(ve)) if vt != ve => {
+                    let incoming: Vec<(BlockId, ValueId)> = live_ends
+                        .iter()
+                        .filter_map(|block| {
+                            self.var_defs[block]
+                                .get(&var_name)
+                                .copied()
+                                .map(|value| (*block, value))
+                        })
+                        .collect();
+                    match incoming.as_slice() {
+                        [(_, value)] => {
+                            merge_defs.insert(var_name, *value);
+                        }
+                        [(_, first), (_, second)] if first != second => {
                             let phi_dst = self.current_func.new_value(Some(var_name.clone()), span);
                             self.current_func.block_mut(merge_bb).phis.push(Phi {
                                 dst: phi_dst,
-                                incoming: vec![(then_end_bb, vt), (else_end_bb, ve)],
+                                incoming,
                                 span,
                             });
                             merge_defs.insert(var_name, phi_dst);
                         }
-                        (Some(vt), _) => {
-                            merge_defs.insert(var_name, vt);
+                        [(_, value), ..] => {
+                            merge_defs.insert(var_name, *value);
                         }
-                        (_, Some(ve)) => {
-                            merge_defs.insert(var_name, ve);
-                        }
-                        _ => {}
+                        [] => {}
                     }
                 }
                 self.var_defs.insert(merge_bb, merge_defs);
                 self.current_bb = merge_bb;
 
+                if live_ends.is_empty() {
+                    self.current_func.block_mut(merge_bb).terminator =
+                        SsaTerminator::Unreachable(span);
+                    self.current_bb = else_end_bb;
+                }
+
                 // If this is an expression with values from both branches, join them
-                if let (Some(vt), Some(ve)) = (then_result, else_result) {
-                    let res_val = self.current_func.new_value(Some("if_res".to_string()), span);
-                    self.current_func.block_mut(merge_bb).phis.push(Phi {
-                        dst: res_val,
-                        incoming: vec![(then_end_bb, vt), (else_end_bb, ve)],
-                        span,
-                    });
-                    res_val
-                } else {
-                    then_result.or(else_result).unwrap_or_else(|| {
+                if then_reaches_merge && else_reaches_merge {
+                    if let (Some(vt), Some(ve)) = (then_result, else_result) {
+                        let res_val = self
+                            .current_func
+                            .new_value(Some("if_res".to_string()), span);
+                        self.current_func.block_mut(merge_bb).phis.push(Phi {
+                            dst: res_val,
+                            incoming: vec![(then_end_bb, vt), (else_end_bb, ve)],
+                            span,
+                        });
+                        res_val
+                    } else {
+                        then_result.or(else_result).unwrap_or_else(|| {
+                            let val = self.current_func.new_value(None, span);
+                            self.current_func.const_values.insert(val, LitVal::Unit);
+                            val
+                        })
+                    }
+                } else if then_reaches_merge {
+                    then_result.unwrap_or_else(|| {
                         let val = self.current_func.new_value(None, span);
                         self.current_func.const_values.insert(val, LitVal::Unit);
                         val
                     })
+                } else if else_reaches_merge {
+                    else_result.unwrap_or_else(|| {
+                        let val = self.current_func.new_value(None, span);
+                        self.current_func.const_values.insert(val, LitVal::Unit);
+                        val
+                    })
+                } else {
+                    let val = self.current_func.new_value(None, span);
+                    self.current_func.const_values.insert(val, LitVal::Unit);
+                    val
                 }
             }
             Expr::Match { target, arms, .. } => {
@@ -580,13 +803,20 @@ impl<'a> SsaBuilder<'a> {
 
                 for arm in arms {
                     let arm_bb = self.new_block("match_arm");
-                    self.current_func.block_mut(arm_bb).predecessors.push(pre_match_bb);
+                    self.current_func
+                        .block_mut(arm_bb)
+                        .predecessors
+                        .push(pre_match_bb);
 
                     let mut arm_defs = self.var_defs[&pre_match_bb].clone();
                     let mut bindings = Vec::new();
 
                     // Collect pattern bindings and create SSA values for them
-                    self.collect_pattern_bindings_into_ssa(&arm.pattern, &mut bindings, &mut arm_defs);
+                    self.collect_pattern_bindings_into_ssa(
+                        &arm.pattern,
+                        &mut bindings,
+                        &mut arm_defs,
+                    );
                     self.var_defs.insert(arm_bb, arm_defs);
 
                     ssa_arms.push(SsaMatchArm {
@@ -600,15 +830,23 @@ impl<'a> SsaBuilder<'a> {
                     let body_res = self.lower_expr(&arm.body);
                     let arm_end_bb = self.current_bb;
                     if !self.current_func.block(arm_end_bb).is_terminated() {
-                        self.current_func.block_mut(arm_end_bb).terminator = SsaTerminator::Goto(exit_bb, span);
-                        self.current_func.block_mut(exit_bb).predecessors.push(arm_end_bb);
+                        self.current_func.block_mut(arm_end_bb).terminator =
+                            SsaTerminator::Goto(exit_bb, span);
+                        self.current_func
+                            .block_mut(exit_bb)
+                            .predecessors
+                            .push(arm_end_bb);
                         arm_results.push((arm_end_bb, body_res));
                     }
                 }
 
                 // In default_bb: unreachable or panic
-                self.current_func.block_mut(default_bb).predecessors.push(pre_match_bb);
-                self.current_func.block_mut(default_bb).terminator = SsaTerminator::Unreachable(span);
+                self.current_func
+                    .block_mut(default_bb)
+                    .predecessors
+                    .push(pre_match_bb);
+                self.current_func.block_mut(default_bb).terminator =
+                    SsaTerminator::Unreachable(span);
 
                 // Terminate pre_match_bb with SsaTerminator::Match
                 self.current_func.block_mut(pre_match_bb).terminator = SsaTerminator::Match {
@@ -624,7 +862,9 @@ impl<'a> SsaBuilder<'a> {
                 self.var_defs.insert(exit_bb, exit_defs);
 
                 if !arm_results.is_empty() {
-                    let res_val = self.current_func.new_value(Some("match_res".to_string()), span);
+                    let res_val = self
+                        .current_func
+                        .new_value(Some("match_res".to_string()), span);
                     self.current_func.block_mut(exit_bb).phis.push(Phi {
                         dst: res_val,
                         incoming: arm_results,
@@ -640,25 +880,52 @@ impl<'a> SsaBuilder<'a> {
             Expr::Spawn { callee, args, .. } => {
                 let callee_val = self.lower_expr(callee);
                 let arg_vals: Vec<ValueId> = args.iter().map(|a| self.lower_expr(a)).collect();
-                self.emit_inst(SsaOp::Spawn { callee: callee_val, args: arg_vals }, None, span)
+                self.emit_inst(
+                    SsaOp::Spawn {
+                        callee: callee_val,
+                        args: arg_vals,
+                    },
+                    None,
+                    span,
+                )
             }
-            Expr::Send { receiver, message, .. } => {
+            Expr::Send {
+                receiver, message, ..
+            } => {
                 let recv_val = self.lower_expr(receiver);
                 let msg_val = self.lower_expr(message);
-                self.emit_inst(SsaOp::Send { receiver: recv_val, message: msg_val }, None, span)
+                self.emit_inst(
+                    SsaOp::Send {
+                        receiver: recv_val,
+                        message: msg_val,
+                    },
+                    None,
+                    span,
+                )
             }
-            Expr::Receive(_) => {
-                self.emit_inst(SsaOp::Receive, None, span)
-            }
-            Expr::Lambda { params, body, span, .. } => {
+            Expr::Receive(_) => self.emit_inst(SsaOp::Receive, None, span),
+            Expr::Lambda {
+                params,
+                ret_type,
+                body,
+                span,
+            } => {
                 // Lambda creates a nested function in SsaProgram
                 let lambda_name = format!("lambda_{}_{}", span.line, span.col);
-                let compiled_name = format!("{}.{}", self.compiled_name, lambda_name);
+                let expected_name = format!("{}.{}", self.compiled_name, lambda_name);
+
+                let compiled_name = self
+                    .resolved
+                    .functions
+                    .iter()
+                    .find(|function| function.compiled_name == expected_name)
+                    .map(|function| function.compiled_name.clone())
+                    .unwrap_or(expected_name);
                 let lambda_fn_def = FnDef {
                     name: lambda_name.clone(),
                     type_params: vec![],
                     params: params.clone(),
-                    ret_type: None,
+                    ret_type: ret_type.clone(),
                     body: body.clone(),
                     span: *span,
                 };
@@ -670,7 +937,10 @@ impl<'a> SsaBuilder<'a> {
                 );
                 self.nested_functions.push(nested_fn);
 
-                let upvals = self.resolved.functions.iter()
+                let upvals = self
+                    .resolved
+                    .functions
+                    .iter()
                     .find(|f| f.compiled_name == compiled_name)
                     .map(|f| &f.upvalues);
                 let mut captured_values = Vec::new();
@@ -679,7 +949,11 @@ impl<'a> SsaBuilder<'a> {
                         if let Some(v) = self.get_var(&u.name) {
                             captured_values.push(v);
                         } else {
-                            let v = self.emit_inst(SsaOp::Upvalue(u.parent_index), Some(u.name.clone()), *span);
+                            let v = self.emit_inst(
+                                SsaOp::Upvalue(u.parent_index),
+                                Some(u.name.clone()),
+                                *span,
+                            );
                             captured_values.push(v);
                         }
                     }
@@ -733,6 +1007,20 @@ impl<'a> SsaBuilder<'a> {
                     self.collect_pattern_bindings_into_ssa(p, bindings, defs);
                 }
             }
+            PatternNode::Struct { fields, .. } => {
+                for field in fields {
+                    match field.clone() {
+                        StructPatternNode::KeyValue { value, .. } => {
+                            self.collect_pattern_bindings_into_ssa(&value, bindings, defs);
+                        }
+                        StructPatternNode::Shorthand { key, span } => {
+                            let val = self.current_func.new_value(Some(key.clone()), span);
+                            bindings.push((key.clone(), val));
+                            defs.insert(key.clone(), val);
+                        }
+                    }
+                }
+            }
             PatternNode::EnumVariant { args, .. } => {
                 for arg in args {
                     self.collect_pattern_bindings_into_ssa(arg, bindings, defs);
@@ -783,7 +1071,11 @@ impl<'a> SsaBuilder<'a> {
 
     fn collect_assigned_vars_in_expr(&self, expr: &Expr, set: &mut HashSet<String>) {
         match expr {
-            Expr::If { then_branch, else_branch, .. } => {
+            Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 set.extend(self.collect_assigned_vars_in_block(then_branch));
                 if let Some(eb) = else_branch {
                     set.extend(self.collect_assigned_vars_in_block(eb));
@@ -809,8 +1101,7 @@ pub fn build_ssa_program(resolved: &ResolvedProgram, module: &Module) -> SsaProg
         match item {
             Item::Decl(Decl::Fn(f)) => {
                 let mut nested = Vec::new();
-                let compiled_name =
-                    find_compiled_function_name(resolved, &module.path, f, None);
+                let compiled_name = find_compiled_function_name(resolved, &module.path, f, None);
                 let ssa_fn = SsaBuilder::build_function_with_compiled_name(
                     resolved,
                     f,
@@ -918,6 +1209,7 @@ pub fn build_ssa_program(resolved: &ResolvedProgram, module: &Module) -> SsaProg
     SsaProgram {
         functions,
         structs: resolved.structs.clone(),
+        enums: resolved.enums.clone(),
     }
 }
 
@@ -928,6 +1220,7 @@ fn find_compiled_function_name(
     impl_def: Option<&ImplDef>,
 ) -> String {
     let module_path = module_path.to_string_lossy();
+
     let parent = if let Some(impl_def) = impl_def {
         match &impl_def.for_protocol {
             Some(proto_name)
@@ -957,21 +1250,19 @@ fn find_compiled_function_name(
     } else {
         module_path.to_string()
     };
+
+    let expected_name = if function.name == "main" && impl_def.is_none() {
+        "main".to_string()
+    } else {
+        format!("{}.{}", parent, function.name)
+    };
+
     resolved
         .functions
         .iter()
-        .find(|resolved_function| {
-            resolved_function.name == function.name
-                && resolved_function.span == function.span
-        })
+        .find(|resolved_function| resolved_function.compiled_name == expected_name)
         .map(|resolved_function| resolved_function.compiled_name.clone())
-        .unwrap_or_else(|| {
-            if function.name == "main" && impl_def.is_none() {
-                "main".to_string()
-            } else {
-                format!("{}.{}", parent, function.name)
-            }
-        })
+        .unwrap_or(expected_name)
 }
 
 pub fn eval_unary_const(op: UnaryOp, lit: &LitVal) -> Option<LitVal> {

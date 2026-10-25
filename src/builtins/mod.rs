@@ -233,8 +233,14 @@ impl Builtins {
             name: "str_to_int",
             param_types: vec![Type::String],
             is_variadic: false,
-            ret_type: Type::Int,
-            doc: "Parses integer from string",
+            ret_type: Type::Variant {
+                cases: HashMap::from([
+                    ("ok".to_string(), vec![Type::Int]),
+                    ("err".to_string(), vec![Type::String]),
+                ]),
+                row: None,
+            },
+            doc: "Parses integer and returns Result[Int, String]",
         });
         self.register(BuiltinFn {
             name: "str_len",
@@ -270,8 +276,17 @@ impl Builtins {
             name: "json_get",
             param_types: vec![Type::String, Type::String],
             is_variadic: false,
-            ret_type: Type::Var(crate::types::ty::TypeVarId(0)),
-            doc: "Extracts a key from a JSON string without full parse",
+            ret_type: Type::Variant {
+                cases: HashMap::from([
+                    (
+                        "some".to_string(),
+                        vec![Type::Var(crate::types::ty::TypeVarId(0))],
+                    ),
+                    ("none".to_string(), Vec::new()),
+                ]),
+                row: None,
+            },
+            doc: "Looks up a JSON path and returns Option[Value]",
         });
 
         // ── File System & Stdio Builtins ──────────────────────────────────────

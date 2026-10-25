@@ -62,9 +62,7 @@ impl ClosureAnalysis {
                 };
 
                 let ty = func_types
-                    .and_then(|types| {
-                        types.values().find(|t| !matches!(t, Type::Var(_))).cloned()
-                    })
+                    .and_then(|types| types.values().find(|t| !matches!(t, Type::Var(_))).cloned())
                     .or_else(|| {
                         type_maps.values().find_map(|types| {
                             types.iter().find_map(|(_, t)| {
@@ -169,7 +167,11 @@ mod tests {
         assert_eq!(analysis.closures.len(), 2, "Must detect exactly 2 closures");
 
         for c in &analysis.closures {
-            assert_eq!(c.captures.len(), 1, "Each closure must capture exactly 1 value");
+            assert_eq!(
+                c.captures.len(),
+                1,
+                "Each closure must capture exactly 1 value"
+            );
             assert_eq!(c.captures[0].name, "x");
             assert!(c.captures[0].is_direct_local);
             assert!(matches!(c.captures[0].kind, CaptureKind::ByValue));
@@ -177,4 +179,3 @@ mod tests {
         }
     }
 }
-

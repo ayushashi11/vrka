@@ -52,7 +52,12 @@ impl FunctionScope {
         self.locals.pop();
     }
 
-    pub fn define_local(&mut self, name: String, kind: VarKind, span: Span) -> Result<usize, SemaError> {
+    pub fn define_local(
+        &mut self,
+        name: String,
+        kind: VarKind,
+        span: Span,
+    ) -> Result<usize, SemaError> {
         let current_scope = self.locals.last_mut().unwrap();
         if current_scope.contains_key(&name) {
             return Err(SemaError::duplicate(name, span));
@@ -93,7 +98,14 @@ impl FunctionScope {
         None
     }
 
-    pub fn add_upvalue(&mut self, name: String, kind: VarKind, parent_index: usize, is_direct_local: bool, span: Span) -> usize {
+    pub fn add_upvalue(
+        &mut self,
+        name: String,
+        kind: VarKind,
+        parent_index: usize,
+        is_direct_local: bool,
+        span: Span,
+    ) -> usize {
         for (i, upval) in self.upvalues.iter().enumerate() {
             if upval.parent_index == parent_index && upval.is_direct_local == is_direct_local {
                 return i;
@@ -123,36 +135,134 @@ impl ScopeManager {
     pub fn new(global_scope_name: String) -> Self {
         let mut namespaces = HashMap::new();
         // Built-in / native namespaces matching IonVM stdlib / FFI
-        namespaces.insert("std".to_string(), vec!["io".to_string(), "fs".to_string(), "os".to_string(), "time".to_string(), "net".to_string(), "json".to_string(), "string".to_string()]);
-        namespaces.insert("std.io".to_string(), vec!["print".to_string(), "println".to_string(), "read_line".to_string(), "read_stdin".to_string()]);
-        namespaces.insert("std.net".to_string(), vec!["tcp_listen".to_string(), "tcp_accept".to_string(), "tcp_recv".to_string(), "tcp_send".to_string(), "tcp_close".to_string(), "tcp_connect".to_string()]);
-        namespaces.insert("std.time".to_string(), vec!["now_ms".to_string(), "sleep_ms".to_string()]);
-        namespaces.insert("std.fs".to_string(), vec!["read_file".to_string(), "write_file".to_string(), "append_file".to_string(), "file_exists".to_string(), "remove_file".to_string()]);
-        namespaces.insert("std.string".to_string(), vec![
-            "str_split".to_string(), "str_slice".to_string(), "str_trim".to_string(), "str_trim_start".to_string(),
-            "str_trim_end".to_string(), "str_starts_with".to_string(), "str_ends_with".to_string(),
-            "str_index_of".to_string(), "str_replace".to_string(), "str_char_at".to_string(),
-            "str_repeat".to_string(), "str_to_int".to_string(), "str_len".to_string(), "to_string".to_string(),
-        ]);
-        namespaces.insert("std.json".to_string(), vec![
-            "json_parse".to_string(), "json_stringify".to_string(), "json_get".to_string(),
-        ]);
-        namespaces.insert("std.syntax".to_string(), vec![
-            "mesh_lex".to_string(), "mesh_layout".to_string(), "mesh_check".to_string(),
-            "mesh_format".to_string(), "mesh_parse_ast".to_string(),
-        ]);
-        namespaces.insert("math".to_string(), vec!["sin".to_string(), "cos".to_string(), "sqrt".to_string(), "abs".to_string()]);
+        namespaces.insert(
+            "std".to_string(),
+            vec![
+                "io".to_string(),
+                "fs".to_string(),
+                "os".to_string(),
+                "time".to_string(),
+                "net".to_string(),
+                "json".to_string(),
+                "string".to_string(),
+            ],
+        );
+        namespaces.insert(
+            "std.io".to_string(),
+            vec![
+                "print".to_string(),
+                "println".to_string(),
+                "read_line".to_string(),
+                "read_stdin".to_string(),
+            ],
+        );
+        namespaces.insert(
+            "std.net".to_string(),
+            vec![
+                "tcp_listen".to_string(),
+                "tcp_accept".to_string(),
+                "tcp_recv".to_string(),
+                "tcp_send".to_string(),
+                "tcp_close".to_string(),
+                "tcp_connect".to_string(),
+            ],
+        );
+        namespaces.insert(
+            "std.time".to_string(),
+            vec!["now_ms".to_string(), "sleep_ms".to_string()],
+        );
+        namespaces.insert(
+            "std.fs".to_string(),
+            vec![
+                "read_file".to_string(),
+                "write_file".to_string(),
+                "append_file".to_string(),
+                "file_exists".to_string(),
+                "remove_file".to_string(),
+            ],
+        );
+        namespaces.insert(
+            "std.string".to_string(),
+            vec![
+                "str_split".to_string(),
+                "str_slice".to_string(),
+                "str_trim".to_string(),
+                "str_trim_start".to_string(),
+                "str_trim_end".to_string(),
+                "str_starts_with".to_string(),
+                "str_ends_with".to_string(),
+                "str_index_of".to_string(),
+                "str_replace".to_string(),
+                "str_char_at".to_string(),
+                "str_repeat".to_string(),
+                "str_to_int".to_string(),
+                "str_len".to_string(),
+                "to_string".to_string(),
+            ],
+        );
+        namespaces.insert(
+            "std.json".to_string(),
+            vec![
+                "json_parse".to_string(),
+                "json_stringify".to_string(),
+                "json_get".to_string(),
+            ],
+        );
+        namespaces.insert(
+            "std.syntax".to_string(),
+            vec![
+                "mesh_lex".to_string(),
+                "mesh_layout".to_string(),
+                "mesh_check".to_string(),
+                "mesh_format".to_string(),
+                "mesh_parse_ast".to_string(),
+            ],
+        );
+        namespaces.insert(
+            "math".to_string(),
+            vec![
+                "sin".to_string(),
+                "cos".to_string(),
+                "sqrt".to_string(),
+                "abs".to_string(),
+            ],
+        );
 
         let str_methods = vec![
-            "replace".to_string(), "trim".to_string(), "trim_start".to_string(), "trim_end".to_string(),
-            "split".to_string(), "slice".to_string(), "starts_with".to_string(), "ends_with".to_string(),
-            "index_of".to_string(), "repeat".to_string(), "to_int".to_string(), "len".to_string(),
-            "char_at".to_string(), "to_string".to_string(),
+            "replace".to_string(),
+            "trim".to_string(),
+            "trim_start".to_string(),
+            "trim_end".to_string(),
+            "split".to_string(),
+            "slice".to_string(),
+            "starts_with".to_string(),
+            "ends_with".to_string(),
+            "index_of".to_string(),
+            "repeat".to_string(),
+            "to_int".to_string(),
+            "len".to_string(),
+            "char_at".to_string(),
+            "to_string".to_string(),
         ];
         namespaces.insert("str".to_string(), str_methods.clone());
         namespaces.insert("String".to_string(), str_methods);
-        namespaces.insert("json".to_string(), vec!["parse".to_string(), "stringify".to_string(), "get".to_string()]);
-        namespaces.insert("io".to_string(), vec!["println".to_string(), "print".to_string(), "read_line".to_string(), "read_stdin".to_string()]);
+        namespaces.insert(
+            "json".to_string(),
+            vec![
+                "parse".to_string(),
+                "stringify".to_string(),
+                "get".to_string(),
+            ],
+        );
+        namespaces.insert(
+            "io".to_string(),
+            vec![
+                "println".to_string(),
+                "print".to_string(),
+                "read_line".to_string(),
+                "read_stdin".to_string(),
+            ],
+        );
 
         Self {
             function_stack: vec![FunctionScope::new("global".to_string(), global_scope_name)],
@@ -187,7 +297,10 @@ impl ScopeManager {
     }
 
     pub fn register_namespace(&mut self, path: &str, child: String) {
-        self.namespaces.entry(path.to_string()).or_default().push(child);
+        self.namespaces
+            .entry(path.to_string())
+            .or_default()
+            .push(child);
     }
 
     pub fn current_fn(&self) -> &FunctionScope {
@@ -199,11 +312,15 @@ impl ScopeManager {
     }
 
     pub fn enter_function(&mut self, name: String, compiled_name: String) {
-        self.function_stack.push(FunctionScope::new(name, compiled_name));
+        self.function_stack
+            .push(FunctionScope::new(name, compiled_name));
     }
 
     pub fn exit_function(&mut self) -> FunctionScope {
-        assert!(self.function_stack.len() > 1, "Cannot exit global function scope");
+        assert!(
+            self.function_stack.len() > 1,
+            "Cannot exit global function scope"
+        );
         self.function_stack.pop().unwrap()
     }
 
@@ -307,7 +424,12 @@ impl ScopeManager {
 
         // Otherwise check if parent has it as an upvalue (recursive capture)
         if let Some(parent_upval_var) = self.resolve_upvalue(parent_idx, name, span) {
-            if let ResolvedVar::Upvalue { upvalue_index: parent_upval_idx, kind: parent_kind, .. } = parent_upval_var {
+            if let ResolvedVar::Upvalue {
+                upvalue_index: parent_upval_idx,
+                kind: parent_kind,
+                ..
+            } = parent_upval_var
+            {
                 let is_const = match parent_kind {
                     VarKind::Constant => true,
                     VarKind::Upvalue { is_const, .. } => is_const,
@@ -338,7 +460,11 @@ impl ScopeManager {
     }
 
     /// Resolves a dotted path (e.g. `["std", "io", "println"]` or `["math", "sin"]`)
-    pub fn resolve_dotted_path(&self, parts: &[String], span: Span) -> Result<ResolvedVar, SemaError> {
+    pub fn resolve_dotted_path(
+        &self,
+        parts: &[String],
+        span: Span,
+    ) -> Result<ResolvedVar, SemaError> {
         if parts.is_empty() {
             return Err(SemaError::undefined("", span));
         }

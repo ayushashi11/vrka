@@ -20,7 +20,7 @@ fn process_data(tag: String, count: Int) -> String:
 fn worker():
     println("worker started...")
     let msg = receive()
-    println("worker received: ", msg)
+    println("worker received: ${msg}")
 
 fn main():
     println("Running power calculation...")

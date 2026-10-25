@@ -201,7 +201,9 @@ impl<'a> Lexer<'a> {
             ';' => Some(TokenKind::Semicolon),
             ':' => {
                 // If followed by an ident char, it's an atom :tag!
-                if rem.len() > 1 && (rem.as_bytes()[1].is_ascii_alphabetic() || rem.as_bytes()[1] == b'_') {
+                if rem.len() > 1
+                    && (rem.as_bytes()[1].is_ascii_alphabetic() || rem.as_bytes()[1] == b'_')
+                {
                     None
                 } else {
                     Some(TokenKind::Colon)
@@ -229,7 +231,11 @@ impl<'a> Lexer<'a> {
             }
             let atom_name = self.src[atom_start..self.pos].to_string();
             let span = Span::new(start_pos, self.pos, start_line, start_col);
-            return Token::new(TokenKind::Atom(atom_name), span, &self.src[start_pos..self.pos]);
+            return Token::new(
+                TokenKind::Atom(atom_name),
+                span,
+                &self.src[start_pos..self.pos],
+            );
         }
 
         // String literals

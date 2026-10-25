@@ -126,4 +126,3 @@ mod tests {
         assert!(msg.contains("Missing destination register"));
     }
 }
-

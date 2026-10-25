@@ -19,13 +19,13 @@ fn format_line_spacing(line: String) -> String:
     if str_ends_with(s, ": "):
         s = str_slice(s, 0, str_len(s) - 1)
     # Preserve enum variant atom colons
-    s = str_replace(s, ": Some", ":Some")
-    s = str_replace(s, ": None", ":None")
-    s = str_replace(s, ": Ok", ":Ok")
-    s = str_replace(s, ": Err", ":Err")
-    s = str_replace(s, "Option: Some", "Option:Some")
-    s = str_replace(s, "Result: Ok", "Result:Ok")
-    s = str_replace(s, "Result: Err", "Result:Err")
+    s = str_replace(s, ": some", ":some")
+    s = str_replace(s, ": none", ":none")
+    s = str_replace(s, ": ok", ":ok")
+    s = str_replace(s, ": err", ":err")
+    s = str_replace(s, "Option: some", "Option:some")
+    s = str_replace(s, "Result: ok", "Result:ok")
+    s = str_replace(s, "Result: err", "Result:err")
 
     # 4. Normalize binary operator spacing
     s = str_replace(s, " = ", "=")

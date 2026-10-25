@@ -1,0 +1,6 @@
+fn main(): 
+    let json_data = json_parse("{\"name\": \"Mesh\", \"version\": 1.0, \"features\": [\"lsp\", \"formatter\"]}")
+    println("Parsed JSON data: ", json_data)
+    match json_data:
+        (name:, features: [head , ..tail]) => println("Name: ${name}, First Feature: ${head}, Remaining Features: ${tail}")
+    return json_data

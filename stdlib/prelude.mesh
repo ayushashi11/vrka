@@ -19,3 +19,78 @@ impl ToString for Bool:
 impl ToString for String:
     fn to_string() -> String:
         return self
+
+enum Result[T, U]:
+    ok(T)
+    err(U)
+
+impl Result[T, U]:
+    fn is_ok() -> Bool:
+        return match self:
+            :ok(_) => true
+            :err(_) => false
+
+    fn is_err() -> Bool:
+        return match self:
+            :ok(_) => false
+            :err(_) => true
+
+    fn unwrap_or(default: T) -> T:
+        return match self:
+            :ok(value) => value
+            :err(_) => default
+
+    fn map[V](f: fn(T) -> V) -> Result[V, U]:
+        return match self:
+            :ok(value) => :ok(f(value))
+            :err(error) => :err(error)
+
+    fn map_err[V](f: fn(U) -> V) -> Result[T, V]:
+        return match self:
+            :ok(value) => :ok(value)
+            :err(error) => :err(f(error))
+
+    fn and_then[V](f: fn(T) -> Result[V, U]) -> Result[V, U]:
+        return match self:
+            :ok(value) => f(value)
+            :err(error) => :err(error)
+
+    fn or_else[V](f: fn(U) -> Result[T, V]) -> Result[T, V]:
+        return match self:
+            :ok(value) => :ok(value)
+            :err(error) => f(error)
+
+enum Option[T]:
+    some(T)
+    none
+
+impl Option[T]:
+    fn is_some() -> Bool:
+        return match self:
+            :some(_) => true
+            :none => false
+
+    fn is_none() -> Bool:
+        return match self:
+            :some(_) => false
+            :none => true
+
+    fn unwrap_or(default: T) -> T:
+        return match self:
+            :some(value) => value
+            :none => default
+
+    fn map[U](f: fn(T) -> U) -> Option[U]:
+        return match self:
+            :some(value) => :some(f(value))
+            :none => :none
+
+    fn and_then[U](f: fn(T) -> Option[U]) -> Option[U]:
+        return match self:
+            :some(value) => f(value)
+            :none => :none
+
+    fn or_else(f: fn() -> Option[T]) -> Option[T]:
+        return match self:
+            :some(value) => :some(value)
+            :none => f()

@@ -12,15 +12,20 @@ pub use closure::{CaptureKind, ClosureAnalysis, ClosureCapture, ClosureEnv};
 pub use codegen::{CodeEmitter, CodegenError, RegAlloc};
 pub use error::{CompileError, Result};
 pub use mir::{
-    build_ssa_program, BasicBlock, BlockId, Phi, SsaFunction, SsaInst, SsaMatchArm, SsaOp,
-    SsaProgram, SsaTerminator, ValueData, ValueId,
+    BasicBlock, BlockId, Phi, SsaFunction, SsaInst, SsaMatchArm, SsaOp, SsaProgram, SsaTerminator,
+    ValueData, ValueId, build_ssa_program,
 };
-pub use sema::{resolve, resolve_with_loader, ModuleLoader, ResolvedFunction, ResolvedProgram, ResolvedStruct, ResolvedVar, SemaError, VarKind};
-pub use syntax::{parse, parse_expression, parse_with_path, Module, ParseError};
+pub use sema::{
+    ModuleLoader, ResolvedEnum, ResolvedFunction, ResolvedProgram, ResolvedStruct, ResolvedVar,
+    SemaError, VarKind, resolve, resolve_with_loader,
+};
+pub use syntax::{Module, ParseError, parse, parse_expression, parse_with_path};
 pub use types::{RowVarId, Type, TypeEnv, TypeError, TypeInferrer, TypeVarId};
 
 /// Compile source code into IonVM Bytecode
-pub fn compile(source: &str) -> std::result::Result<vmm::bytecode::instruction::Bytecode, CompileError> {
+pub fn compile(
+    source: &str,
+) -> std::result::Result<vmm::bytecode::instruction::Bytecode, CompileError> {
     compile_with_path(source, None)
 }
 
@@ -36,7 +41,8 @@ pub fn compile_with_path(
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| std::path::PathBuf::from("<memory>")),
     )?;
-    let loader = sema::ModuleLoader::new(file_path.and_then(|p| p.parent().map(|d| d.to_path_buf())));
+    let loader =
+        sema::ModuleLoader::new(file_path.and_then(|p| p.parent().map(|d| d.to_path_buf())));
     let resolved = sema::resolve_with_loader(&module, loader)?;
     let ssa = build_ssa_program(&resolved, &module);
     let mut inferrer = TypeInferrer::new();
@@ -55,15 +61,16 @@ pub fn run(source: &str) -> anyhow::Result<Option<vmm::lang::types::Value>> {
         .context("Failed to compile source program")?;
     let mut vm = vmm::vm::IonVM::new(bytecode)
         .map_err(|e| anyhow::anyhow!("IonVM initialization error: {}", e))?;
-    vm.run().map_err(|e| anyhow::anyhow!("IonVM runtime error: {}", e))?;
+    vm.run()
+        .map_err(|e| anyhow::anyhow!("IonVM runtime error: {}", e))?;
     Ok(vm.entrypoint_return())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{compile, run};
-    use vmm::bytecode::opcode::Opcode;
     use vmm::bytecode::instruction::OperandType;
+    use vmm::bytecode::opcode::Opcode;
     use vmm::lang::types::Value;
 
     #[test]
@@ -88,40 +95,43 @@ mod tests {
                     Some(OperandType::Property(property)) if property == "to_string"
                 )
         }));
-        assert!(main
-            .instructions
-            .iter()
-            .any(|instruction| instruction.opcode == Opcode::Call));
+        assert!(
+            main.instructions
+                .iter()
+                .any(|instruction| instruction.opcode == Opcode::Call)
+        );
 
         let to_string = bytecode
             .functions
             .iter()
             .find(|function| function.name == "__ionvm.prelude.Bool.#ToString.to_string")
             .expect("Bool ToString implementation is emitted separately");
-        assert!(to_string
-            .instructions
-            .iter()
-            .any(|instruction| instruction.opcode == Opcode::FormatValue));
+        assert!(
+            to_string
+                .instructions
+                .iter()
+                .any(|instruction| instruction.opcode == Opcode::FormatValue)
+        );
     }
 
     #[test]
     fn primitive_to_string_uses_mesh_prelude_implementations() {
-        let result = run(
-            r#"
+        let result = run(r#"
             fn main() -> Array[String]:
                 return [42.to_string(), 3.14.to_string(), true.to_string(), "mesh".to_string()]
-            "#,
-        )
+            "#)
         .expect("program runs");
 
         assert_eq!(
             result,
-            Some(Value::Array(std::sync::Arc::new(std::sync::RwLock::new(vec![
-                Value::String("42".into()),
-                Value::String("3.14".into()),
-                Value::String("true".into()),
-                Value::String("mesh".into()),
-            ]))))
+            Some(Value::Array(std::sync::Arc::new(std::sync::RwLock::new(
+                vec![
+                    Value::String("42".into()),
+                    Value::String("3.14".into()),
+                    Value::String("true".into()),
+                    Value::String("mesh".into()),
+                ]
+            ))))
         );
     }
 }

@@ -82,13 +82,18 @@ impl ModuleLoader {
 
     /// Load and parse a module from resolved path
     pub fn load_file(&mut self, path: &Path) -> Result<(Module, PathBuf), String> {
-        let canonical = fs::canonicalize(path).map_err(|e| format!("Cannot find path '{}': {}", path.display(), e))?;
+        let canonical = fs::canonicalize(path)
+            .map_err(|e| format!("Cannot find path '{}': {}", path.display(), e))?;
         if self.visited.contains(&canonical) {
-            return Err(format!("Circular import detected for '{}'", canonical.display()));
+            return Err(format!(
+                "Circular import detected for '{}'",
+                canonical.display()
+            ));
         }
         self.visited.insert(canonical.clone());
 
-        let source = fs::read_to_string(&canonical).map_err(|e| format!("Failed to read '{}': {}", canonical.display(), e))?;
+        let source = fs::read_to_string(&canonical)
+            .map_err(|e| format!("Failed to read '{}': {}", canonical.display(), e))?;
         let module = parse_with_path(&source, canonical.clone())
             .map_err(|e| format!("Parse error in '{}': {}", canonical.display(), e))?;
 

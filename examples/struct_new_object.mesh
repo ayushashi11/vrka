@@ -4,21 +4,37 @@ struct Point: {
 }
 
 impl Point:
+    fn origin() -> Point:
+        return Point(0, 0)
     fn describe() -> String:
         return match self:
-            Point(0, 0) => {
+            Point(x: 0, y: 0) => {
                 "Origin"
             }
-            Point(x, 0) => "On the x-axis at x=${x}"
-            Point(0, y) => "On the y-axis at y=${y}"
-            Point(x, y) => "Point x=${x}, y=${y}"
+            Point(x, y: 0) => "On the x-axis at x=${x}"
+            Point(x: 0, y) => "On the y-axis at y=${y}"
+            Point(x, y: this_binds_to_y) => "Point x=${x}, y=${this_binds_to_y}"
 
 impl ToString for Point:
     fn to_string() -> String:
         return self.describe()
 
 fn main():
-    let point = Point(0, read_line().to_int())
+    print("Enter a point (x coordinate): ")
+    let point = match read_line().to_int():
+        :ok(x) => {
+            print("Enter a point (y coordinate): ")
+            match read_line().to_int():
+                :ok(y) => Point(x, y)
+                :err(e) => {
+                    println(e)
+                    Point.origin()
+                }
+        }
+        :err(e) => {
+            println(e)
+            Point.origin()
+        }
     const description = point.to_string()
     println(description)
     println((4.1+5.0).to_string())

@@ -7,7 +7,7 @@ fn find_next(cur_start: Int, end_val: Int, powers: [Int]) -> Int:
             let digit = n % 10
             total = total + powers[digit]
             if total > cur:
-                n = 0
+                n = -1
             else:
                 n = n / 10
         if total == cur:

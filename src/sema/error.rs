@@ -39,22 +39,13 @@ pub enum SemaError {
     },
 
     #[error("Break statement outside of loop at line {line}:{col}")]
-    BreakOutsideLoop {
-        line: usize,
-        col: usize,
-    },
+    BreakOutsideLoop { line: usize, col: usize },
 
     #[error("Continue statement outside of loop at line {line}:{col}")]
-    ContinueOutsideLoop {
-        line: usize,
-        col: usize,
-    },
+    ContinueOutsideLoop { line: usize, col: usize },
 
     #[error("Return statement outside of function at line {line}:{col}")]
-    ReturnOutsideFunction {
-        line: usize,
-        col: usize,
-    },
+    ReturnOutsideFunction { line: usize, col: usize },
 
     #[error("Import error: {message} at line {line}:{col}")]
     ImportError {

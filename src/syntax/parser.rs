@@ -68,6 +68,10 @@ impl<'a> Parser<'a> {
         &self.current.kind == kind
     }
 
+    pub fn peek_check(&mut self, kind: &TokenKind) -> bool {
+        &self.peek().kind == kind
+    }
+
     pub fn match_token(&mut self, kind: &TokenKind) -> bool {
         if self.check(kind) {
             self.advance();
@@ -408,7 +412,10 @@ impl<'a> Parser<'a> {
             }
             other => {
                 return Err(ParseError {
-                    message: format!("Expected module path or string after 'import', found '{}'", other),
+                    message: format!(
+                        "Expected module path or string after 'import', found '{}'",
+                        other
+                    ),
                     span: self.current.span,
                 });
             }
@@ -780,16 +787,62 @@ impl<'a> Parser<'a> {
             TokenKind::LParen => {
                 let lparen = self.advance();
                 self.lexer.push_mode(LexMode::ExprMl);
+                self.skip_terminators();
+                if self.check(&TokenKind::RParen) {
+                    let rparen = self.advance();
+                    self.lexer.pop_mode();
+                    return Ok(Expr::Literal(LitVal::Unit, lparen.span.merge(rparen.span)));
+                }
+
+                // Check if this is a Record literal: (x: 10, y: 20) or (x:, y:)
+                if let TokenKind::Ident(_) = &self.current.kind {
+                    if self.peek_check(&TokenKind::Colon) {
+                        let mut fields = Vec::new();
+                        while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
+                            self.skip_terminators();
+                            if self.check(&TokenKind::RParen) {
+                                break;
+                            }
+                            let key = self.parse_ident_name()?;
+                            self.expect(&TokenKind::Colon)?;
+                            self.skip_terminators();
+                            let val = if self.check(&TokenKind::Comma)
+                                || self.check(&TokenKind::RParen)
+                            {
+                                Expr::Ident(key.clone(), lparen.span)
+                            } else {
+                                self.parse_expr()?
+                            };
+                            fields.push((key, val));
+                            self.skip_terminators();
+                            if !self.match_token(&TokenKind::Comma) {
+                                self.skip_terminators();
+                                break;
+                            }
+                            self.skip_terminators();
+                        }
+                        let rparen = self.expect(&TokenKind::RParen)?;
+                        self.lexer.pop_mode();
+                        return Ok(Expr::RecordLit(fields, lparen.span.merge(rparen.span)));
+                    }
+                }
+
                 let first = self.parse_expr()?;
+                self.skip_terminators();
                 if self.match_token(&TokenKind::Comma) {
                     // Tuple literal
                     let mut items = vec![first];
+                    self.skip_terminators();
                     while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
                         items.push(self.parse_expr()?);
+                        self.skip_terminators();
                         if !self.match_token(&TokenKind::Comma) {
+                            self.skip_terminators();
                             break;
                         }
+                        self.skip_terminators();
                     }
+                    self.skip_terminators();
                     let rparen = self.expect(&TokenKind::RParen)?;
                     self.lexer.pop_mode();
                     Ok(Expr::TupleLit(items, lparen.span.merge(rparen.span)))
@@ -1008,7 +1061,10 @@ impl<'a> Parser<'a> {
                 }
 
                 if brace_depth != 0 {
-                    return Err(ParseError::new("Unclosed '${' in interpolated string", span));
+                    return Err(ParseError::new(
+                        "Unclosed '${' in interpolated string",
+                        span,
+                    ));
                 }
 
                 let expr_src = &s[expr_start..expr_end];
@@ -1048,7 +1104,9 @@ impl<'a> Parser<'a> {
                     } else {
                         Some(Box::new(self.parse_expr()?))
                     };
-                    let span = tok.span.merge(end_expr.as_ref().map(|e| e.span()).unwrap_or(tok.span));
+                    let span = tok
+                        .span
+                        .merge(end_expr.as_ref().map(|e| e.span()).unwrap_or(tok.span));
                     Ok(PatternNode::Range {
                         start: Some(Box::new(Expr::Literal(LitVal::Int(val), tok.span))),
                         end: end_expr,
@@ -1087,6 +1145,41 @@ impl<'a> Parser<'a> {
             }
             TokenKind::LParen => {
                 let lparen = self.advance();
+                if self.match_token(&TokenKind::RParen) {
+                    return Ok(PatternNode::Literal(LitVal::Unit, lparen.span));
+                }
+                // Check if this is a Record pattern: (x: 10, y: 20) or (x:, y:)
+                if let TokenKind::Ident(_) = &self.current.kind {
+                    if self.peek_check(&TokenKind::Colon) {
+                        let mut fields = Vec::new();
+                        while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
+                            let field_name = self.parse_ident_name()?;
+                            self.expect(&TokenKind::Colon)?;
+                            if self.check(&TokenKind::Comma) || self.check(&TokenKind::RParen) {
+                                fields.push(StructPatternNode::Shorthand {
+                                    key: field_name,
+                                    span: lparen.span,
+                                });
+                            } else {
+                                let field_pat = self.parse_pattern()?;
+                                fields.push(StructPatternNode::KeyValue {
+                                    key: field_name,
+                                    value: Box::new(field_pat),
+                                    span: lparen.span,
+                                });
+                            }
+                            if !self.match_token(&TokenKind::Comma) {
+                                break;
+                            }
+                        }
+                        let rparen = self.expect(&TokenKind::RParen)?;
+                        return Ok(PatternNode::Struct {
+                            name: None,
+                            fields,
+                            span: lparen.span.merge(rparen.span),
+                        });
+                    }
+                }
                 let mut pats = Vec::new();
                 while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
                     pats.push(self.parse_pattern()?);
@@ -1107,11 +1200,13 @@ impl<'a> Parser<'a> {
                         let dotdot = self.advance();
                         if self.check(&TokenKind::Ident("_".to_string())) {
                             let tok = self.advance();
-                            segments.push(PatternSegment::WildcardList(dotdot.span.merge(tok.span)));
+                            segments
+                                .push(PatternSegment::WildcardList(dotdot.span.merge(tok.span)));
                         } else if let TokenKind::Ident(bind_name) = &self.current.kind {
                             let name = bind_name.clone();
                             let tok = self.advance();
-                            segments.push(PatternSegment::BindList(name, dotdot.span.merge(tok.span)));
+                            segments
+                                .push(PatternSegment::BindList(name, dotdot.span.merge(tok.span)));
                         } else {
                             segments.push(PatternSegment::WildcardList(dotdot.span));
                         }
@@ -1140,19 +1235,56 @@ impl<'a> Parser<'a> {
                 // Check for Enum variant match Variant(p1, p2)
                 if self.check(&TokenKind::LParen) {
                     self.advance();
-                    let mut args = Vec::new();
-                    while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
-                        args.push(self.parse_pattern()?);
-                        if !self.match_token(&TokenKind::Comma) {
-                            break;
+                    if name.starts_with(":") {
+                        let mut args = Vec::new();
+                        while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
+                            args.push(self.parse_pattern()?);
+                            if !self.match_token(&TokenKind::Comma) {
+                                break;
+                            }
                         }
+                        let rparen = self.expect(&TokenKind::RParen)?;
+                        Ok(PatternNode::EnumVariant {
+                            name,
+                            args,
+                            span: tok.span.merge(rparen.span),
+                        })
+                    } else {
+                        let mut fields = Vec::new();
+                        while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
+                            let field_name = self.parse_ident_name()?;
+                            if self.check(&TokenKind::Colon) {
+                                self.advance();
+                                if self.check(&TokenKind::Comma) || self.check(&TokenKind::RParen) {
+                                    fields.push(StructPatternNode::Shorthand {
+                                        key: field_name,
+                                        span: tok.span,
+                                    });
+                                } else {
+                                    let field_pat = self.parse_pattern()?;
+                                    fields.push(StructPatternNode::KeyValue {
+                                        key: field_name,
+                                        value: Box::new(field_pat),
+                                        span: tok.span,
+                                    });
+                                }
+                            } else {
+                                fields.push(StructPatternNode::Shorthand {
+                                    key: field_name,
+                                    span: tok.span,
+                                });
+                            }
+                            if !self.match_token(&TokenKind::Comma) {
+                                break;
+                            }
+                        }
+                        let rparen = self.expect(&TokenKind::RParen)?;
+                        Ok(PatternNode::Struct {
+                            name: Some(name),
+                            fields,
+                            span: tok.span.merge(rparen.span),
+                        })
                     }
-                    let rparen = self.expect(&TokenKind::RParen)?;
-                    Ok(PatternNode::EnumVariant {
-                        name,
-                        args,
-                        span: tok.span.merge(rparen.span),
-                    })
                 } else {
                     Ok(PatternNode::Bind(name, tok.span))
                 }
@@ -1363,6 +1495,21 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_annotated_local_in_indented_function() {
+        let src = r#"
+fn inner_sqrt(x: Float) -> Float:
+    const nguess: Float = (x + 1.0) / 2.0
+    return nguess
+"#;
+        let module = parse(src).expect("parsed");
+        assert_eq!(module.items.len(), 1);
+        let Item::Decl(Decl::Fn(function)) = &module.items[0] else {
+            panic!("expected fn");
+        };
+        assert_eq!(function.body.stmts.len(), 2);
+    }
+
+    #[test]
     fn test_parse_protocol_impl() {
         let src = r#"
         impl ToString for Point: {
@@ -1377,7 +1524,10 @@ mod tests {
         };
         assert_eq!(impl_def.target_type.get_compiled_name(), "Point");
         assert_eq!(
-            impl_def.for_protocol.as_ref().map(TypeAnn::get_compiled_name),
+            impl_def
+                .for_protocol
+                .as_ref()
+                .map(TypeAnn::get_compiled_name),
             Some("ToString".to_string())
         );
         assert_eq!(impl_def.methods[0].name, "to_string");
@@ -1415,5 +1565,22 @@ mod tests {
         "#;
         let module = parse(src).expect("parsed");
         assert_eq!(module.items.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_record_literal_and_pattern() {
+        let src = r#"
+        fn main(): {
+            let r = (x: 10, y: 20)
+            let s = (x:, y: 30)
+            match r: {
+                (x: a, y: b) => a + b,
+                (x:, y:) => x + y,
+                _ => 0,
+            }
+        }
+        "#;
+        let module = parse(src).expect("parsed record literal and pattern");
+        assert_eq!(module.items.len(), 1);
     }
 }

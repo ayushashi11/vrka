@@ -25,10 +25,19 @@ pub struct ResolvedStruct {
 }
 
 #[derive(Debug, Clone)]
+pub struct ResolvedEnum {
+    pub name: String,
+    pub compiled_name: String,
+    pub variants: Vec<VariantDef>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
 pub struct ResolvedProgram {
     pub var_resolutions: HashMap<Span, ResolvedVar>,
     pub functions: Vec<ResolvedFunction>,
     pub structs: Vec<ResolvedStruct>,
+    pub enums: Vec<ResolvedEnum>,
     pub top_level_consts: HashMap<String, LitVal>,
     pub imported_modules: Vec<Module>,
 }
@@ -69,11 +78,8 @@ impl Resolver {
                 Item::Decl(Decl::Fn(f)) => {
                     let module_path = module.path.to_string_lossy().to_string();
                     let compiled_name = self.compiled_function_name(&module_path, &f.name);
-                    self.scopes.register_global_compiled(
-                        f.name.clone(),
-                        compiled_name,
-                        f.span,
-                    )?;
+                    self.scopes
+                        .register_global_compiled(f.name.clone(), compiled_name, f.span)?;
                 }
                 Item::Decl(Decl::Struct(s)) => {
                     let module_path = module.path.to_string_lossy().to_string();
@@ -84,9 +90,15 @@ impl Resolver {
                     )?;
                 }
                 Item::Decl(Decl::Enum(e)) => {
-                    self.scopes.register_global(e.name.clone(), e.span)?;
+                    let module_path = module.path.to_string_lossy().to_string();
+                    self.scopes.register_global_compiled(
+                        e.name.clone(),
+                        format!("{}.{}", module_path, e.name),
+                        e.span,
+                    )?;
                     for v in &e.variants {
-                        self.scopes.register_enum_variant(e.name.clone(), v.name.clone(), v.span);
+                        self.scopes
+                            .register_enum_variant(e.name.clone(), v.name.clone(), v.span);
                     }
                 }
                 Item::Decl(Decl::Protocol(p)) => {
@@ -96,7 +108,9 @@ impl Resolver {
                 Item::Decl(Decl::Import(imp)) => {
                     self.resolve_import(imp)?;
                 }
-                Item::Stmt(Stmt::Const { name, init, span, .. }) => {
+                Item::Stmt(Stmt::Const {
+                    name, init, span, ..
+                }) => {
                     self.scopes.register_global(name.clone(), *span)?;
                     if let Expr::Literal(lit, _) = init {
                         self.top_level_consts.insert(name.clone(), lit.clone());
@@ -116,7 +130,11 @@ impl Resolver {
                 }
                 Item::Decl(Decl::Impl(impl_def)) => {
                     for method in &impl_def.methods {
-                        self.resolve_fn_def(method, impl_compiled_parent(&module.path, impl_def), true)?;
+                        self.resolve_fn_def(
+                            method,
+                            impl_compiled_parent(&module.path, impl_def),
+                            true,
+                        )?;
                     }
                 }
                 Item::Decl(_) => {}
@@ -130,7 +148,10 @@ impl Resolver {
             Item::Decl(Decl::Fn(f)) => f.name == "main",
             _ => false,
         });
-        let has_top_level_stmts = module.items.iter().any(|item| matches!(item, Item::Stmt(_)));
+        let has_top_level_stmts = module
+            .items
+            .iter()
+            .any(|item| matches!(item, Item::Stmt(_)));
         if !has_main && has_top_level_stmts {
             let global_scope = &self.scopes.function_stack[0];
             self.completed_functions.push(ResolvedFunction {
@@ -138,43 +159,59 @@ impl Resolver {
                 compiled_name: "main".to_string(),
                 total_locals: global_scope.next_slot,
                 upvalues: global_scope.upvalues.clone(),
-                span: Span { start: 0, end: 0, line: 1, col: 1 },
+                span: Span {
+                    start: 0,
+                    end: 0,
+                    line: 1,
+                    col: 1,
+                },
             });
         }
 
         let mut structs = Vec::new();
+        let mut enums = Vec::new();
         for struct_module in std::iter::once(module).chain(self.imported_modules.iter()) {
             let module_path = struct_module.path.to_string_lossy();
             for item in &struct_module.items {
-                let Item::Decl(Decl::Struct(def)) = item else {
-                    continue;
-                };
-                let compiled_name = format!("{}.{}", module_path, def.name);
-                let mut methods = Vec::new();
-                for impl_item in &struct_module.items {
-                    let Item::Decl(Decl::Impl(impl_def)) = impl_item else {
-                        continue;
-                    };
-                    if impl_def.target_type.get_compiled_name() != def.name {
-                        continue;
+                match item {
+                    Item::Decl(Decl::Struct(def)) => {
+                        let compiled_name = format!("{}.{}", module_path, def.name);
+                        let mut methods = Vec::new();
+                        for impl_item in &struct_module.items {
+                            let Item::Decl(Decl::Impl(impl_def)) = impl_item else {
+                                continue;
+                            };
+                            if impl_def.target_type.get_compiled_name() != def.name {
+                                continue;
+                            }
+                            for method in &impl_def.methods {
+                                let compiled_method = self
+                                    .completed_functions
+                                    .iter()
+                                    .find(|function| function.span == method.span)
+                                    .map(|function| function.compiled_name.clone())
+                                    .unwrap_or_else(|| {
+                                        format!("{}.{}.{}", module_path, def.name, method.name)
+                                    });
+                                methods.push((method.name.clone(), compiled_method));
+                            }
+                        }
+                        structs.push(ResolvedStruct {
+                            name: def.name.clone(),
+                            compiled_name,
+                            fields: def.fields.clone(),
+                            methods,
+                            span: def.span,
+                        });
                     }
-                    for method in &impl_def.methods {
-                        let compiled_method = self
-                            .completed_functions
-                            .iter()
-                            .find(|function| function.span == method.span)
-                            .map(|function| function.compiled_name.clone())
-                            .unwrap_or_else(|| format!("{}.{}.{}", module_path, def.name, method.name));
-                        methods.push((method.name.clone(), compiled_method));
-                    }
+                    Item::Decl(Decl::Enum(def)) => enums.push(ResolvedEnum {
+                        name: def.name.clone(),
+                        compiled_name: format!("{}.{}", module_path, def.name),
+                        variants: def.variants.clone(),
+                        span: def.span,
+                    }),
+                    _ => {}
                 }
-                structs.push(ResolvedStruct {
-                    name: def.name.clone(),
-                    compiled_name,
-                    fields: def.fields.clone(),
-                    methods,
-                    span: def.span,
-                });
             }
         }
 
@@ -182,6 +219,7 @@ impl Resolver {
             var_resolutions: std::mem::take(&mut self.var_resolutions),
             functions: std::mem::take(&mut self.completed_functions),
             structs,
+            enums,
             top_level_consts: std::mem::take(&mut self.top_level_consts),
             imported_modules: std::mem::take(&mut self.imported_modules),
         })
@@ -199,12 +237,16 @@ impl Resolver {
             }
             ImportTarget::Path(path_str) | ImportTarget::Ident(path_str) => {
                 let resolved_path = self.loader.resolve_path(path_str).ok_or_else(|| {
-                    SemaError::import_error(format!("Cannot resolve module '{}'", path_str), imp.span)
+                    SemaError::import_error(
+                        format!("Cannot resolve module '{}'", path_str),
+                        imp.span,
+                    )
                 })?;
 
-                let (imported_module, _canonical) = self.loader.load_file(&resolved_path).map_err(|e| {
-                    SemaError::import_error(e, imp.span)
-                })?;
+                let (imported_module, _canonical) = self
+                    .loader
+                    .load_file(&resolved_path)
+                    .map_err(|e| SemaError::import_error(e, imp.span))?;
 
                 // 1. Discover top-level declarations of imported module
                 for item in &imported_module.items {
@@ -229,9 +271,18 @@ impl Resolver {
                             );
                         }
                         Item::Decl(Decl::Enum(e)) => {
-                            let _ = self.scopes.register_global(e.name.clone(), e.span);
+                            let module_path = imported_module.path.to_string_lossy().to_string();
+                            let _ = self.scopes.register_global_compiled(
+                                e.name.clone(),
+                                format!("{}.{}", module_path, e.name),
+                                e.span,
+                            );
                             for v in &e.variants {
-                                self.scopes.register_enum_variant(e.name.clone(), v.name.clone(), v.span);
+                                self.scopes.register_enum_variant(
+                                    e.name.clone(),
+                                    v.name.clone(),
+                                    v.span,
+                                );
                             }
                         }
                         Item::Decl(Decl::Protocol(p)) => {
@@ -240,7 +291,9 @@ impl Resolver {
                         Item::Decl(Decl::Import(nested_imp)) => {
                             self.resolve_import(nested_imp)?;
                         }
-                        Item::Stmt(Stmt::Const { name, init, span, .. }) => {
+                        Item::Stmt(Stmt::Const {
+                            name, init, span, ..
+                        }) => {
                             let _ = self.scopes.register_global(name.clone(), *span);
                             if let Expr::Literal(lit, _) = init {
                                 self.top_level_consts.insert(name.clone(), lit.clone());
@@ -254,7 +307,11 @@ impl Resolver {
                 for item in &imported_module.items {
                     match item {
                         Item::Decl(Decl::Fn(f)) => {
-                            self.resolve_fn_def(f, imported_module.path.to_string_lossy().to_string(), false)?;
+                            self.resolve_fn_def(
+                                f,
+                                imported_module.path.to_string_lossy().to_string(),
+                                false,
+                            )?;
                         }
                         Item::Decl(Decl::Impl(impl_def)) => {
                             for method in &impl_def.methods {
@@ -275,12 +332,22 @@ impl Resolver {
         Ok(())
     }
 
-    fn resolve_fn_def(&mut self, f: &FnDef, parent: String, is_method: bool) -> Result<(), SemaError> {
+    fn resolve_fn_def(
+        &mut self,
+        f: &FnDef,
+        parent: String,
+        is_method: bool,
+    ) -> Result<(), SemaError> {
         let compiled_name = self.compiled_function_name(&parent, &f.name);
-        self.scopes.enter_function(f.name.clone(), compiled_name.clone());
+        self.scopes
+            .enter_function(f.name.clone(), compiled_name.clone());
 
         for param in &f.params {
-            self.scopes.current_fn_mut().define_local(param.name.clone(), VarKind::Constant, param.span)?;
+            self.scopes.current_fn_mut().define_local(
+                param.name.clone(),
+                VarKind::Constant,
+                param.span,
+            )?;
         }
 
         let was_resolving_method = self.resolving_method;
@@ -310,174 +377,203 @@ impl Resolver {
     }
 
     fn validate_protocol_implementations(&self, module: &Module) -> Result<(), SemaError> {
-            let modules = std::iter::once(module).chain(self.imported_modules.iter());
-            for impl_module in std::iter::once(module).chain(self.imported_modules.iter()) {
-                for item in &impl_module.items {
-                    let Item::Decl(Decl::Impl(impl_def)) = item else {
-                        continue;
-                    };
-                    let Some(protocol_type) = &impl_def.for_protocol else {
-                        continue;
-                    };
-                    let protocol_name = protocol_type.get_compiled_name();
-                    let protocol = modules
-                        .clone()
-                        .flat_map(|m| m.items.iter())
-                        .find_map(|item| match item {
-                            Item::Decl(Decl::Protocol(protocol)) if protocol.name == protocol_name => {
-                                Some(protocol)
-                            }
-                            _ => None,
-                        });
+        let modules = std::iter::once(module).chain(self.imported_modules.iter());
+        for impl_module in std::iter::once(module).chain(self.imported_modules.iter()) {
+            for item in &impl_module.items {
+                let Item::Decl(Decl::Impl(impl_def)) = item else {
+                    continue;
+                };
+                let Some(protocol_type) = &impl_def.for_protocol else {
+                    continue;
+                };
+                let protocol_name = protocol_type.get_compiled_name();
+                let protocol = modules
+                    .clone()
+                    .flat_map(|m| m.items.iter())
+                    .find_map(|item| match item {
+                        Item::Decl(Decl::Protocol(protocol)) if protocol.name == protocol_name => {
+                            Some(protocol)
+                        }
+                        _ => None,
+                    });
 
-                    let (required_properties, required_methods) = if let Some(protocol) = protocol {
-                        (
-                            protocol
-                                .properties
-                                .iter()
-                                .map(|property| (property.name.as_str(), property.type_ann.get_compiled_name()))
-                                .collect::<Vec<_>>(),
-                            protocol.methods.iter().collect::<Vec<_>>(),
-                        )
+                let (required_properties, required_methods) = if let Some(protocol) = protocol {
+                    (
+                        protocol
+                            .properties
+                            .iter()
+                            .map(|property| {
+                                (
+                                    property.name.as_str(),
+                                    property.type_ann.get_compiled_name(),
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                        protocol.methods.iter().collect::<Vec<_>>(),
+                    )
+                } else {
+                    match protocol_name.as_str() {
+                        "ToString" => (Vec::new(), Vec::new()),
+                        "Format" => (Vec::new(), Vec::new()),
+                        _ => {
+                            return Err(SemaError::custom(
+                                format!("Unknown protocol '{}'", protocol_name),
+                                impl_def.span,
+                            ));
+                        }
+                    }
+                };
+
+                let target_name = impl_def.target_type.get_compiled_name();
+                let target_struct = std::iter::once(module)
+                    .chain(self.imported_modules.iter())
+                    .flat_map(|m| m.items.iter())
+                    .find_map(|item| match item {
+                        Item::Decl(Decl::Struct(def)) if def.name == target_name => Some(def),
+                        _ => None,
+                    });
+
+                for (property_name, expected_type) in required_properties {
+                    let actual_type = if let Some(target_struct) = target_struct {
+                        target_struct
+                            .fields
+                            .iter()
+                            .find(|field| field.name == property_name)
+                            .map(|field| field.type_ann.get_compiled_name())
                     } else {
-                        match protocol_name.as_str() {
-                            "ToString" => (Vec::new(), Vec::new()),
-                            "Format" => (Vec::new(), Vec::new()),
-                            _ => {
-                                return Err(SemaError::custom(
-                                    format!("Unknown protocol '{}'", protocol_name),
-                                    impl_def.span,
-                                ));
-                            }
-                        }
+                        builtin_property_type(&target_name, property_name).map(str::to_string)
                     };
-
-                    let target_name = impl_def.target_type.get_compiled_name();
-                    let target_struct = std::iter::once(module)
-                        .chain(self.imported_modules.iter())
-                        .flat_map(|m| m.items.iter())
-                        .find_map(|item| match item {
-                            Item::Decl(Decl::Struct(def)) if def.name == target_name => Some(def),
-                            _ => None,
-                        });
-
-                    for (property_name, expected_type) in required_properties {
-                        let actual_type = if let Some(target_struct) = target_struct {
-                            target_struct
-                                .fields
-                                .iter()
-                                .find(|field| field.name == property_name)
-                                .map(|field| field.type_ann.get_compiled_name())
-                        } else {
-                            builtin_property_type(&target_name, property_name)
-                                .map(str::to_string)
-                        };
-                        match actual_type {
-                            Some(actual_type) if actual_type == expected_type => {}
-                            Some(actual_type) => {
-                                return Err(SemaError::custom(
-                                    format!(
-                                        "Type '{}' does not satisfy protocol '{}': property '{}' has type '{}', expected '{}'",
-                                        target_name, protocol_name, property_name, actual_type, expected_type
-                                    ),
-                                    impl_def.span,
-                                ));
-                            }
-                            None => {
-                                return Err(SemaError::custom(
-                                    format!(
-                                        "Type '{}' does not satisfy protocol '{}': missing property '{}'",
-                                        target_name, protocol_name, property_name
-                                    ),
-                                    impl_def.span,
-                                ));
-                            }
-                        }
-                    }
-
-                    for required_method in required_methods {
-                        let Some(method) = impl_def
-                            .methods
-                            .iter()
-                            .find(|method| method.name == required_method.name)
-                        else {
+                    match actual_type {
+                        Some(actual_type) if actual_type == expected_type => {}
+                        Some(actual_type) => {
                             return Err(SemaError::custom(
                                 format!(
-                                    "Type '{}' does not satisfy protocol '{}': missing method '{}'",
-                                    target_name, protocol_name, required_method.name
+                                    "Type '{}' does not satisfy protocol '{}': property '{}' has type '{}', expected '{}'",
+                                    target_name,
+                                    protocol_name,
+                                    property_name,
+                                    actual_type,
+                                    expected_type
                                 ),
                                 impl_def.span,
                             ));
-                        };
-                        if !method_signatures_match(required_method, method) {
-                            return Err(SemaError::custom(
-                                format!(
-                                    "Type '{}' does not satisfy protocol '{}': method '{}' has an incompatible signature",
-                                    target_name, protocol_name, required_method.name
-                                ),
-                                method.span,
-                            ));
                         }
-                    }
-
-                    if protocol_name == "ToString" {
-                        let Some(method) = impl_def.methods.iter().find(|method| method.name == "to_string") else {
+                        None => {
                             return Err(SemaError::custom(
                                 format!(
-                                    "Type '{}' does not satisfy protocol 'ToString': missing method 'to_string'",
-                                    target_name
+                                    "Type '{}' does not satisfy protocol '{}': missing property '{}'",
+                                    target_name, protocol_name, property_name
                                 ),
                                 impl_def.span,
-                            ));
-                        };
-                        if method.params.iter().filter(|param| param.name == "self").count() > 1
-                            || method.params.iter().any(|param| param.name != "self")
-                            || method.ret_type.as_ref().map(TypeAnn::get_compiled_name).as_deref()
-                                != Some("String")
-                        {
-                            return Err(SemaError::custom(
-                                format!(
-                                    "Type '{}' does not satisfy protocol 'ToString': method 'to_string' must have signature fn() -> String",
-                                    target_name
-                                ),
-                                method.span,
-                            ));
-                        }
-                    }
-
-                    if protocol_name == "Format" {
-                        let Some(method) = impl_def.methods.iter().find(|method| method.name == "format") else {
-                            return Err(SemaError::custom(
-                                format!(
-                                    "Type '{}' does not satisfy protocol 'Format': missing method 'format'",
-                                    target_name
-                                ),
-                                impl_def.span,
-                            ));
-                        };
-                        let params = method
-                            .params
-                            .iter()
-                            .filter(|param| param.name != "self")
-                            .map(|param| param.type_ann.as_ref().map(TypeAnn::get_compiled_name))
-                            .collect::<Vec<_>>();
-                        if params != [Some("String".to_string())]
-                            || method.ret_type.as_ref().map(TypeAnn::get_compiled_name).as_deref()
-                                != Some("String")
-                        {
-                            return Err(SemaError::custom(
-                                format!(
-                                    "Type '{}' does not satisfy protocol 'Format': method 'format' must have signature fn(String) -> String",
-                                    target_name
-                                ),
-                                method.span,
                             ));
                         }
                     }
                 }
+
+                for required_method in required_methods {
+                    let Some(method) = impl_def
+                        .methods
+                        .iter()
+                        .find(|method| method.name == required_method.name)
+                    else {
+                        return Err(SemaError::custom(
+                            format!(
+                                "Type '{}' does not satisfy protocol '{}': missing method '{}'",
+                                target_name, protocol_name, required_method.name
+                            ),
+                            impl_def.span,
+                        ));
+                    };
+                    if !method_signatures_match(required_method, method) {
+                        return Err(SemaError::custom(
+                            format!(
+                                "Type '{}' does not satisfy protocol '{}': method '{}' has an incompatible signature",
+                                target_name, protocol_name, required_method.name
+                            ),
+                            method.span,
+                        ));
+                    }
+                }
+
+                if protocol_name == "ToString" {
+                    let Some(method) = impl_def
+                        .methods
+                        .iter()
+                        .find(|method| method.name == "to_string")
+                    else {
+                        return Err(SemaError::custom(
+                            format!(
+                                "Type '{}' does not satisfy protocol 'ToString': missing method 'to_string'",
+                                target_name
+                            ),
+                            impl_def.span,
+                        ));
+                    };
+                    if method
+                        .params
+                        .iter()
+                        .filter(|param| param.name == "self")
+                        .count()
+                        > 1
+                        || method.params.iter().any(|param| param.name != "self")
+                        || method
+                            .ret_type
+                            .as_ref()
+                            .map(TypeAnn::get_compiled_name)
+                            .as_deref()
+                            != Some("String")
+                    {
+                        return Err(SemaError::custom(
+                            format!(
+                                "Type '{}' does not satisfy protocol 'ToString': method 'to_string' must have signature fn() -> String",
+                                target_name
+                            ),
+                            method.span,
+                        ));
+                    }
+                }
+
+                if protocol_name == "Format" {
+                    let Some(method) = impl_def
+                        .methods
+                        .iter()
+                        .find(|method| method.name == "format")
+                    else {
+                        return Err(SemaError::custom(
+                            format!(
+                                "Type '{}' does not satisfy protocol 'Format': missing method 'format'",
+                                target_name
+                            ),
+                            impl_def.span,
+                        ));
+                    };
+                    let params = method
+                        .params
+                        .iter()
+                        .filter(|param| param.name != "self")
+                        .map(|param| param.type_ann.as_ref().map(TypeAnn::get_compiled_name))
+                        .collect::<Vec<_>>();
+                    if params != [Some("String".to_string())]
+                        || method
+                            .ret_type
+                            .as_ref()
+                            .map(TypeAnn::get_compiled_name)
+                            .as_deref()
+                            != Some("String")
+                    {
+                        return Err(SemaError::custom(
+                            format!(
+                                "Type '{}' does not satisfy protocol 'Format': method 'format' must have signature fn(String) -> String",
+                                target_name
+                            ),
+                            method.span,
+                        ));
+                    }
+                }
             }
-            Ok(())
         }
+        Ok(())
+    }
 
     fn resolve_block(&mut self, block: &Block) -> Result<(), SemaError> {
         self.scopes.current_fn_mut().enter_block();
@@ -496,9 +592,15 @@ impl Resolver {
 
     fn resolve_stmt(&mut self, stmt: &Stmt) -> Result<(), SemaError> {
         match stmt {
-            Stmt::Let { name, init, span, .. } => {
+            Stmt::Let {
+                name, init, span, ..
+            } => {
                 self.resolve_expr(init)?;
-                let slot = self.scopes.current_fn_mut().define_local(name.clone(), VarKind::Mutable, *span)?;
+                let slot = self.scopes.current_fn_mut().define_local(
+                    name.clone(),
+                    VarKind::Mutable,
+                    *span,
+                )?;
                 self.var_resolutions.insert(
                     *span,
                     ResolvedVar::Local {
@@ -509,9 +611,15 @@ impl Resolver {
                     },
                 );
             }
-            Stmt::Const { name, init, span, .. } => {
+            Stmt::Const {
+                name, init, span, ..
+            } => {
                 self.resolve_expr(init)?;
-                let slot = self.scopes.current_fn_mut().define_local(name.clone(), VarKind::Constant, *span)?;
+                let slot = self.scopes.current_fn_mut().define_local(
+                    name.clone(),
+                    VarKind::Constant,
+                    *span,
+                )?;
                 self.var_resolutions.insert(
                     *span,
                     ResolvedVar::Local {
@@ -526,7 +634,9 @@ impl Resolver {
                 self.resolve_expr(val)?;
                 self.check_and_resolve_assignment(target, *span)?;
             }
-            Stmt::AugAssign { target, val, span, .. } => {
+            Stmt::AugAssign {
+                target, val, span, ..
+            } => {
                 self.resolve_expr(val)?;
                 self.check_and_resolve_assignment(target, *span)?;
             }
@@ -550,7 +660,11 @@ impl Resolver {
         Ok(())
     }
 
-    fn check_and_resolve_assignment(&mut self, target: &Expr, assign_span: Span) -> Result<(), SemaError> {
+    fn check_and_resolve_assignment(
+        &mut self,
+        target: &Expr,
+        assign_span: Span,
+    ) -> Result<(), SemaError> {
         match target {
             Expr::Ident(name, span) => {
                 if name == "self" && self.resolving_method {
@@ -580,14 +694,15 @@ impl Resolver {
                 self.var_resolutions.insert(*span, resolved);
                 Ok(())
             }
-            Expr::FieldAccess { base, .. } => {
-                self.resolve_expr(base)
-            }
+            Expr::FieldAccess { base, .. } => self.resolve_expr(base),
             Expr::Index { base, index, .. } => {
                 self.resolve_expr(base)?;
                 self.resolve_expr(index)
             }
-            other => Err(SemaError::invalid_assignment_target(format!("{:?}", other), assign_span)),
+            other => Err(SemaError::invalid_assignment_target(
+                format!("{:?}", other),
+                assign_span,
+            )),
         }
     }
 
@@ -604,7 +719,8 @@ impl Resolver {
             }
             Expr::Ident(name, span) => {
                 if name == "self" && self.resolving_method {
-                    self.var_resolutions.insert(*span, ResolvedVar::This { span: *span });
+                    self.var_resolutions
+                        .insert(*span, ResolvedVar::This { span: *span });
                     return Ok(());
                 }
                 let resolved = self.scopes.resolve(name, *span)?;
@@ -614,7 +730,8 @@ impl Resolver {
             Expr::Atom(name, span) => {
                 // Enum variant like :Circle or :Rect
                 let raw_name = name.strip_prefix(':').unwrap_or(name);
-                let resolved = if let Some((enum_name, _)) = self.scopes.enum_variants.get(raw_name) {
+                let resolved = if let Some((enum_name, _)) = self.scopes.enum_variants.get(raw_name)
+                {
                     ResolvedVar::EnumVariant {
                         enum_name: Some(enum_name.clone()),
                         variant_name: raw_name.to_string(),
@@ -663,8 +780,19 @@ impl Resolver {
                 }
                 Ok(())
             }
+            Expr::RecordLit(fields, _) => {
+                for (_, item) in fields {
+                    self.resolve_expr(item)?;
+                }
+                Ok(())
+            }
             Expr::Block(block) => self.resolve_block(block),
-            Expr::If { cond, then_branch, else_branch, .. } => {
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 self.resolve_expr(cond)?;
                 self.resolve_block(then_branch)?;
                 if let Some(eb) = else_branch {
@@ -689,18 +817,28 @@ impl Resolver {
                 }
                 Ok(())
             }
-            Expr::Send { receiver, message, .. } => {
+            Expr::Send {
+                receiver, message, ..
+            } => {
                 self.resolve_expr(receiver)?;
                 self.resolve_expr(message)
             }
             Expr::Receive(_) => Ok(()),
-            Expr::Lambda { params, body, span, .. } => {
+            Expr::Lambda {
+                params, body, span, ..
+            } => {
                 let lambda_name = format!("lambda_{}_{}", span.line, span.col);
-                let compiled_name = format!("{}.{}", self.scopes.current_fn().compiled_name, lambda_name);
-                self.scopes.enter_function(lambda_name.clone(), compiled_name);
+                let compiled_name =
+                    format!("{}.{}", self.scopes.current_fn().compiled_name, lambda_name);
+                self.scopes
+                    .enter_function(lambda_name.clone(), compiled_name);
 
                 for p in params {
-                    self.scopes.current_fn_mut().define_local(p.name.clone(), VarKind::Constant, p.span)?;
+                    self.scopes.current_fn_mut().define_local(
+                        p.name.clone(),
+                        VarKind::Constant,
+                        p.span,
+                    )?;
                 }
 
                 self.resolve_block(body)?;
@@ -721,7 +859,11 @@ impl Resolver {
     fn collect_dotted_path(&self, base: &Expr, leaf_field: &str) -> Option<Vec<String>> {
         match base {
             Expr::Ident(name, _) => Some(vec![name.clone(), leaf_field.to_string()]),
-            Expr::FieldAccess { base: inner_base, field: inner_field, .. } => {
+            Expr::FieldAccess {
+                base: inner_base,
+                field: inner_field,
+                ..
+            } => {
                 let mut path = self.collect_dotted_path(inner_base, inner_field)?;
                 path.push(leaf_field.to_string());
                 Some(path)
@@ -733,7 +875,11 @@ impl Resolver {
     fn resolve_pattern_bindings(&mut self, pat: &PatternNode) -> Result<(), SemaError> {
         match pat {
             PatternNode::Bind(name, span) => {
-                let slot = self.scopes.current_fn_mut().define_local(name.clone(), VarKind::Constant, *span)?;
+                let slot = self.scopes.current_fn_mut().define_local(
+                    name.clone(),
+                    VarKind::Constant,
+                    *span,
+                )?;
                 self.var_resolutions.insert(
                     *span,
                     ResolvedVar::Local {
@@ -749,6 +895,31 @@ impl Resolver {
                     self.resolve_pattern_bindings(p)?;
                 }
             }
+            PatternNode::Struct { fields, .. } => {
+                for field_pat in fields {
+                    match field_pat {
+                        StructPatternNode::KeyValue { value, .. } => {
+                            self.resolve_pattern_bindings(value)?;
+                        }
+                        StructPatternNode::Shorthand { key, span } => {
+                            let slot = self.scopes.current_fn_mut().define_local(
+                                key.clone(),
+                                VarKind::Constant,
+                                *span,
+                            )?;
+                            self.var_resolutions.insert(
+                                *span,
+                                ResolvedVar::Local {
+                                    slot,
+                                    kind: VarKind::Constant,
+                                    name: key.clone(),
+                                    span: *span,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
             PatternNode::EnumVariant { args, .. } => {
                 for arg in args {
                     self.resolve_pattern_bindings(arg)?;
@@ -759,7 +930,11 @@ impl Resolver {
                     match seg {
                         PatternSegment::Element(p) => self.resolve_pattern_bindings(p)?,
                         PatternSegment::BindList(name, span) => {
-                            let slot = self.scopes.current_fn_mut().define_local(name.clone(), VarKind::Constant, *span)?;
+                            let slot = self.scopes.current_fn_mut().define_local(
+                                name.clone(),
+                                VarKind::Constant,
+                                *span,
+                            )?;
                             self.var_resolutions.insert(
                                 *span,
                                 ResolvedVar::Local {
@@ -796,53 +971,49 @@ fn impl_compiled_parent(path: &std::path::Path, impl_def: &ImplDef) -> String {
             target_name,
             proto_name.get_compiled_name()
         ),
-        None => format!(
-            "{}.{}",
-            module_path,
-            target_name
-        ),
+        None => format!("{}.{}", module_path, target_name),
     }
 }
 
 fn method_signatures_match(required: &FnSig, actual: &FnDef) -> bool {
-        let required_params = required
-            .params
-            .iter()
-            .filter(|param| param.name != "self")
-            .map(|param| param.type_ann.as_ref().map(TypeAnn::get_compiled_name))
-            .collect::<Vec<_>>();
-        let actual_params = actual
-            .params
-            .iter()
-            .filter(|param| param.name != "self")
-            .map(|param| param.type_ann.as_ref().map(TypeAnn::get_compiled_name))
-            .collect::<Vec<_>>();
-        required_params == actual_params
-            && required
+    let required_params = required
+        .params
+        .iter()
+        .filter(|param| param.name != "self")
+        .map(|param| param.type_ann.as_ref().map(TypeAnn::get_compiled_name))
+        .collect::<Vec<_>>();
+    let actual_params = actual
+        .params
+        .iter()
+        .filter(|param| param.name != "self")
+        .map(|param| param.type_ann.as_ref().map(TypeAnn::get_compiled_name))
+        .collect::<Vec<_>>();
+    required_params == actual_params
+        && required
+            .ret_type
+            .as_ref()
+            .map(TypeAnn::get_compiled_name)
+            .unwrap_or_else(|| "Unit".to_string())
+            == actual
                 .ret_type
                 .as_ref()
                 .map(TypeAnn::get_compiled_name)
                 .unwrap_or_else(|| "Unit".to_string())
-                == actual
-                    .ret_type
-                    .as_ref()
-                    .map(TypeAnn::get_compiled_name)
-                    .unwrap_or_else(|| "Unit".to_string())
 }
 
 fn builtin_property_type(type_name: &str, property_name: &str) -> Option<&'static str> {
-        match (type_name, property_name) {
-            ("String" | "Array" | "IntArray" | "FloatArray", "length") => Some("Int"),
-            ("Float", "is_nan" | "is_infinite") => Some("Bool"),
-            _ => None,
+    match (type_name, property_name) {
+        ("String" | "Array" | "IntArray" | "FloatArray", "length") => Some("Int"),
+        ("Float", "is_nan" | "is_infinite") => Some("Bool"),
+        _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{resolve, resolve_with_loader};
     use crate::syntax::parse;
+    use crate::{resolve, resolve_with_loader};
 
     #[test]
     fn test_resolve_forward_reference_recursion() {
@@ -940,7 +1111,11 @@ mod tests {
         let resolved = resolve(&module).expect("resolved");
         assert_eq!(resolved.functions.len(), 2);
         // Find the lambda function
-        let lambda = resolved.functions.iter().find(|f| f.name.starts_with("lambda")).expect("lambda found");
+        let lambda = resolved
+            .functions
+            .iter()
+            .find(|f| f.name.starts_with("lambda"))
+            .expect("lambda found");
         assert_eq!(lambda.upvalues.len(), 1);
         assert_eq!(lambda.upvalues[0].name, "x");
         assert!(lambda.upvalues[0].is_direct_local);
@@ -1003,7 +1178,13 @@ mod tests {
     #[test]
     fn test_resolve_import_file_and_run() {
         use std::io::Write;
-        let dir = std::env::temp_dir().join(format!("mesh_test_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!(
+            "mesh_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
 
         let helper_path = dir.join("math_helper.mesh");
@@ -1032,7 +1213,10 @@ mod tests {
 
         let mut vm = vmm::vm::IonVM::new(bytecode).expect("vm init");
         vm.run().expect("vm run");
-        assert_eq!(vm.entrypoint_return(), Some(vmm::lang::types::Value::Int(42)));
+        assert_eq!(
+            vm.entrypoint_return(),
+            Some(vmm::lang::types::Value::Int(42))
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1088,14 +1272,31 @@ mod tests {
             .to_string_lossy()
             .to_string()
             + ".shared";
-        assert!(ssa.functions.iter().any(|function| function.name == first_compiled_name));
-        assert!(ssa.functions.iter().any(|function| function.name == second_compiled_name));
+        println!("First compiled name: {}", first_compiled_name);
+        println!("Second compiled name: {}", second_compiled_name);
+        println!(
+            "SSA functions: {:?}",
+            ssa.functions.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
+        assert!(
+            ssa.functions
+                .iter()
+                .any(|function| function.name == first_compiled_name)
+        );
+        assert!(
+            ssa.functions
+                .iter()
+                .any(|function| function.name == second_compiled_name)
+        );
         assert!(ssa.functions.iter().any(|function| function.name == "main"));
 
         let bytecode = crate::codegen::CodeEmitter::emit_program(&ssa);
         let mut vm = vmm::vm::IonVM::new(bytecode).expect("vm init");
         vm.run().expect("vm run");
-        assert_eq!(vm.entrypoint_return(), Some(vmm::lang::types::Value::Int(11)));
+        assert_eq!(
+            vm.entrypoint_return(),
+            Some(vmm::lang::types::Value::Int(11))
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1103,7 +1304,13 @@ mod tests {
     #[test]
     fn test_resolve_import_mesh_path_env() {
         use std::io::Write;
-        let dir = std::env::temp_dir().join(format!("mesh_path_test_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!(
+            "mesh_path_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
 
         let lib_path = dir.join("calc.mesh");
@@ -1130,7 +1337,10 @@ mod tests {
 
         let mut vm = vmm::vm::IonVM::new(bytecode).expect("vm init");
         vm.run().expect("vm run");
-        assert_eq!(vm.entrypoint_return(), Some(vmm::lang::types::Value::Int(30)));
+        assert_eq!(
+            vm.entrypoint_return(),
+            Some(vmm::lang::types::Value::Int(30))
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1138,19 +1348,38 @@ mod tests {
     #[test]
     fn test_resolve_import_circular_error() {
         use std::io::Write;
-        let dir = std::env::temp_dir().join(format!("mesh_circ_test_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!(
+            "mesh_circ_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
 
         let file_a = dir.join("mod_a.mesh");
         let file_b = dir.join("mod_b.mesh");
 
         let mut fa = std::fs::File::create(&file_a).unwrap();
-        writeln!(fa, "import \"{}\";\nfn a(): {{ return 1; }}", file_b.display()).unwrap();
+        writeln!(
+            fa,
+            "import \"{}\";\nfn a(): {{ return 1; }}",
+            file_b.display()
+        )
+        .unwrap();
 
         let mut fb = std::fs::File::create(&file_b).unwrap();
-        writeln!(fb, "import \"{}\";\nfn b(): {{ return 2; }}", file_a.display()).unwrap();
+        writeln!(
+            fb,
+            "import \"{}\";\nfn b(): {{ return 2; }}",
+            file_a.display()
+        )
+        .unwrap();
 
-        let main_src = format!("import \"{}\";\nfn main(): {{ return 0; }}", file_a.display());
+        let main_src = format!(
+            "import \"{}\";\nfn main(): {{ return 0; }}",
+            file_a.display()
+        );
         let module = parse(&main_src).expect("parsed");
         let loader = ModuleLoader::new(Some(dir.clone()));
         let res = resolve_with_loader(&module, loader);

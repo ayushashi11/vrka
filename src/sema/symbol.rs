@@ -51,7 +51,7 @@ pub enum ResolvedVar {
         path: Vec<String>,
         span: Span,
     },
-    /// Enum variant tag (e.g. `:Circle`, `:Rect`, `:Ok`, `:Err`)
+    /// Enum variant tag (e.g. `:Circle`, `:Rect`, `:ok`, `:err`)
     EnumVariant {
         enum_name: Option<String>,
         variant_name: String,

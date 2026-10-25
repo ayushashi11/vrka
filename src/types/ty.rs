@@ -31,8 +31,8 @@ pub enum Type {
     Never,
 
     // ── Specialized Numeric Arrays & Ranges (Resolved during Type Resolution) ─
-    IntArray,               // Unboxed i64 vector
-    FloatArray,             // Unboxed f64 vector
+    IntArray,   // Unboxed i64 vector
+    FloatArray, // Unboxed f64 vector
     IntRange {
         inclusive: bool,
     },
@@ -41,9 +41,9 @@ pub enum Type {
     },
 
     // ── Polymorphic & Compound Types ────────────────────────────────────────
-    Array(Box<Type>),       // Dynamic / boxed element array
+    Array(Box<Type>), // Dynamic / boxed element array
     Tuple(Vec<Type>),
-    
+
     // ── Row Polymorphic Record for Duck Typing ──────────────────────────────
     // An open record allows any object with at least these fields to unify!
     Record {
@@ -100,8 +100,12 @@ impl fmt::Display for Type {
             Type::Never => write!(f, "Never"),
             Type::IntArray => write!(f, "IntArray"),
             Type::FloatArray => write!(f, "FloatArray"),
-            Type::IntRange { inclusive } => write!(f, "IntRange({})", if *inclusive { "..=" } else { ".." }),
-            Type::FloatRange { inclusive } => write!(f, "FloatRange({})", if *inclusive { "..=" } else { ".." }),
+            Type::IntRange { inclusive } => {
+                write!(f, "IntRange({})", if *inclusive { "..=" } else { ".." })
+            }
+            Type::FloatRange { inclusive } => {
+                write!(f, "FloatRange({})", if *inclusive { "..=" } else { ".." })
+            }
             Type::Array(inner) => write!(f, "Array[{}]", inner),
             Type::Tuple(items) => {
                 write!(f, "(")?;

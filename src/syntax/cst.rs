@@ -128,6 +128,11 @@ pub enum PatternNode {
     Literal(LitVal, Span),
     Bind(String, Span),
     Tuple(Vec<PatternNode>, Span),
+    Struct {
+        name: Option<String>,
+        fields: Vec<StructPatternNode>,
+        span: Span,
+    },
     EnumVariant {
         name: String,
         args: Vec<PatternNode>,
@@ -153,10 +158,24 @@ impl PatternNode {
             PatternNode::Bind(_, s) => *s,
             PatternNode::Tuple(_, s) => *s,
             PatternNode::EnumVariant { span, .. } => *span,
+            PatternNode::Struct { span, .. } => *span,
             PatternNode::Array { span, .. } => *span,
             PatternNode::Range { span, .. } => *span,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum StructPatternNode {
+    KeyValue {
+        key: String,
+        value: Box<PatternNode>,
+        span: Span,
+    },
+    Shorthand {
+        key: String,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -220,6 +239,7 @@ pub enum Expr {
     },
     ArrayLit(Vec<Expr>, Span),
     TupleLit(Vec<Expr>, Span),
+    RecordLit(Vec<(String, Expr)>, Span),
     Block(Block),
     If {
         cond: Box<Expr>,
@@ -265,6 +285,7 @@ impl Expr {
             Expr::Index { span, .. } => *span,
             Expr::ArrayLit(_, s) => *s,
             Expr::TupleLit(_, s) => *s,
+            Expr::RecordLit(_, s) => *s,
             Expr::Block(b) => b.span,
             Expr::If { span, .. } => *span,
             Expr::Match { span, .. } => *span,

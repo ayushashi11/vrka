@@ -1,6 +1,6 @@
 use anyhow::Context;
 use lang::{
-    build_ssa_program, parse_with_path, ClosureAnalysis, CodeEmitter, CompileError, TypeInferrer,
+    ClosureAnalysis, CodeEmitter, CompileError, TypeInferrer, build_ssa_program, parse_with_path,
 };
 use std::env;
 use std::fs;
@@ -84,14 +84,25 @@ fn main() -> anyhow::Result<()> {
                 file_path = Some("-".to_string());
             }
             unknown => {
-                anyhow::bail!("Unknown option '{}'. Use --help for usage information.", unknown);
+                anyhow::bail!(
+                    "Unknown option '{}'. Use --help for usage information.",
+                    unknown
+                );
             }
         }
         i += 1;
     }
 
     // Default to --all if no specific stage flag is provided
-    if !show_ast && !show_sema && !show_mir && !show_types && !show_closures && !show_bytecode && !run_vm && output_path.is_none() {
+    if !show_ast
+        && !show_sema
+        && !show_mir
+        && !show_types
+        && !show_closures
+        && !show_bytecode
+        && !run_vm
+        && output_path.is_none()
+    {
         show_all = true;
     }
 
@@ -116,10 +127,7 @@ fn main() -> anyhow::Result<()> {
     let file_label = file_path.as_deref().unwrap_or("<stdin>");
 
     // ── Pass 1: Lex + Parse ──────────────────────────────────────────────────
-    let module = match parse_with_path(
-        &source_code,
-        std::path::PathBuf::from(file_label),
-    ) {
+    let module = match parse_with_path(&source_code, std::path::PathBuf::from(file_label)) {
         Ok(m) => m,
         Err(e) => {
             let err = CompileError::from(e);
@@ -166,7 +174,10 @@ fn main() -> anyhow::Result<()> {
                 );
             }
         }
-        println!("\nResolved Variables ({} symbols resolved):", resolved.var_resolutions.len());
+        println!(
+            "\nResolved Variables ({} symbols resolved):",
+            resolved.var_resolutions.len()
+        );
         for (span, res) in &resolved.var_resolutions {
             println!("  [{}:{}] -> {:?}", span.line, span.col, res);
         }
