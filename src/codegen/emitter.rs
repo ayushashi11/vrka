@@ -2157,7 +2157,7 @@ mod tests {
             })
             .collect();
         assert!(type_operands.contains(&"<memory>.Point"));
-        assert!(type_operands.contains(&"<memory>.Option"));
+        assert!(type_operands.contains(&"__ionvm.prelude.Option"));
 
         let mut vm = IonVM::new(bytecode).expect("init vm");
         vm.run().expect("run vm");
@@ -2167,7 +2167,7 @@ mod tests {
         let option_type = option_type.read().expect("Option prototype is readable");
         assert_eq!(
             option_type.get_property("@"),
-            Some(Value::String("<memory>.Option".to_string()))
+            Some(Value::String("__ionvm.prelude.Option".to_string()))
         );
     }
 
@@ -2188,7 +2188,7 @@ mod tests {
         let result = result.read().expect("Result object is readable");
         assert_eq!(
             result.get_property("@"),
-            Some(Value::String("<memory>.Result".to_string()))
+            Some(Value::String("__ionvm.prelude.Result".to_string()))
         );
         assert_eq!(
             result.get_property("@@"),
@@ -2237,7 +2237,7 @@ mod tests {
         let option = option.read().expect("Option object is readable");
         assert_eq!(
             option.get_property("@"),
-            Some(Value::String("<memory>.Option".to_string()))
+            Some(Value::String("__ionvm.prelude.Option".to_string()))
         );
         assert_eq!(
             option.get_property("@@"),
@@ -2275,7 +2275,7 @@ mod tests {
             assert_eq!(option.get_property("@payload_0"), payload);
             assert_eq!(
                 option.get_property("@"),
-                Some(Value::String("<memory>.Option".to_string()))
+                Some(Value::String("__ionvm.prelude.Option".to_string()))
             );
         }
     }
@@ -2297,7 +2297,7 @@ mod tests {
         let option = option.read().expect("Option object is readable");
         assert_eq!(
             option.get_property("@"),
-            Some(Value::String("<memory>.Option".to_string()))
+            Some(Value::String("__ionvm.prelude.Option".to_string()))
         );
         assert_eq!(
             option.get_property("@@"),
@@ -2924,7 +2924,7 @@ mod tests {
         let result = result.read().expect("enum object is readable");
         assert_eq!(
             result.get_property("@"),
-            Some(Value::String("<memory>.Result".to_string()))
+            Some(Value::String("__ionvm.prelude.Result".to_string()))
         );
         assert_eq!(
             result
@@ -3035,7 +3035,7 @@ mod tests {
         let result = result.read().expect("Result object is readable");
         assert_eq!(
             result.get_property("@"),
-            Some(Value::String("<memory>.Result".to_string()))
+            Some(Value::String("__ionvm.prelude.Result".to_string()))
         );
         assert_eq!(
             result.get_property("@@"),
@@ -3075,7 +3075,7 @@ mod tests {
         let option = option.read().expect("Option object is readable");
         assert_eq!(
             option.get_property("@"),
-            Some(Value::String("<memory>.Option".to_string()))
+            Some(Value::String("__ionvm.prelude.Option".to_string()))
         );
         assert_eq!(
             option.get_property("@@"),

@@ -22,6 +22,40 @@ pub use sema::{
 pub use syntax::{Module, ParseError, parse, parse_expression, parse_with_path};
 pub use types::{RowVarId, Type, TypeEnv, TypeError, TypeInferrer, TypeVarId};
 
+pub const PRELUDE_SOURCE: &str = include_str!("../stdlib/prelude.mesh");
+
+pub fn ensure_prelude_imported(module: &mut syntax::Module) {
+    if module.path == std::path::Path::new("__ionvm.prelude") {
+        return;
+    }
+    let already_imported = module.items.iter().any(|item| {
+        if let syntax::Item::Decl(syntax::Decl::Import(imp)) = item {
+            match &imp.target {
+                syntax::ImportTarget::Path(p) | syntax::ImportTarget::Ident(p) => {
+                    p == "__ionvm.prelude"
+                }
+                _ => false,
+            }
+        } else {
+            false
+        }
+    });
+    if !already_imported {
+        module.items.insert(
+            0,
+            syntax::Item::Decl(syntax::Decl::Import(syntax::ImportDef {
+                target: syntax::ImportTarget::Path("__ionvm.prelude".to_string()),
+                span: syntax::Span {
+                    start: 0,
+                    end: 0,
+                    line: 1,
+                    col: 1,
+                },
+            })),
+        );
+    }
+}
+
 /// Compile source code into IonVM Bytecode
 pub fn compile(
     source: &str,
@@ -34,13 +68,13 @@ pub fn compile_with_path(
     source: &str,
     file_path: Option<&std::path::Path>,
 ) -> std::result::Result<vmm::bytecode::instruction::Bytecode, CompileError> {
-    let source = format!("{source}\n{}", include_str!("../stdlib/prelude.mesh"));
-    let module = parse_with_path(
-        &source,
+    let mut module = parse_with_path(
+        source,
         file_path
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| std::path::PathBuf::from("<memory>")),
     )?;
+    ensure_prelude_imported(&mut module);
     let loader =
         sema::ModuleLoader::new(file_path.and_then(|p| p.parent().map(|d| d.to_path_buf())));
     let resolved = sema::resolve_with_loader(&module, loader)?;

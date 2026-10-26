@@ -40,6 +40,9 @@ impl ModuleLoader {
 
     /// Resolve module identifier or path string to a canonical file path
     pub fn resolve_path(&self, target: &str) -> Option<PathBuf> {
+        if target == "__ionvm.prelude" {
+            return Some(PathBuf::from("__ionvm.prelude"));
+        }
         let p = Path::new(target);
         if p.is_absolute() && p.exists() {
             return fs::canonicalize(p).ok();
@@ -82,6 +85,16 @@ impl ModuleLoader {
 
     /// Load and parse a module from resolved path
     pub fn load_file(&mut self, path: &Path) -> Result<(Module, PathBuf), String> {
+        if path == Path::new("__ionvm.prelude") {
+            if self.visited.contains(path) {
+                return Err("Circular import detected for '__ionvm.prelude'".to_string());
+            }
+            self.visited.insert(path.to_path_buf());
+            let module = parse_with_path(crate::PRELUDE_SOURCE, PathBuf::from("__ionvm.prelude"))
+                .map_err(|e| format!("Parse error in prelude: {}", e))?;
+            return Ok((module, PathBuf::from("__ionvm.prelude")));
+        }
+
         let canonical = fs::canonicalize(path)
             .map_err(|e| format!("Cannot find path '{}': {}", path.display(), e))?;
         if self.visited.contains(&canonical) {

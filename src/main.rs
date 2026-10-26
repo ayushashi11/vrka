@@ -118,7 +118,6 @@ fn main() -> anyhow::Result<()> {
             buffer
         }
     };
-    let source_code = format!("{source_code}\n{}", include_str!("../stdlib/prelude.mesh"));
 
     if source_code.trim().is_empty() {
         anyhow::bail!("Input source code is empty");
@@ -127,7 +126,7 @@ fn main() -> anyhow::Result<()> {
     let file_label = file_path.as_deref().unwrap_or("<stdin>");
 
     // ── Pass 1: Lex + Parse ──────────────────────────────────────────────────
-    let module = match parse_with_path(&source_code, std::path::PathBuf::from(file_label)) {
+    let mut module = match parse_with_path(&source_code, std::path::PathBuf::from(file_label)) {
         Ok(m) => m,
         Err(e) => {
             let err = CompileError::from(e);
@@ -135,6 +134,7 @@ fn main() -> anyhow::Result<()> {
             process::exit(1);
         }
     };
+    lang::ensure_prelude_imported(&mut module);
 
     if show_ast || show_all {
         println!("=== [Pass 1: Parsed CST / AST] ===");
